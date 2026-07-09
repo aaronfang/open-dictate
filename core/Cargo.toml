@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+  "core-audio",
+  "core-stt",
+  "core-llm",
+  "core-pipeline",
+  "core-store",
+  "core-ffi",
+]
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/aaronfang/open-dictate"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+bytes = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+uniffi = "0.29"
+async-trait = "0.1"
+tempfile = "3"
+hound = "3"
+base64 = "0.22"

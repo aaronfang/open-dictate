@@ -1,0 +1,18 @@
+namespace open_dictate_core {
+  DictateResult dictate_wav(DictateOptions options);
+};
+
+dictionary DictateOptions {
+  string wav_path;
+  string store_path;
+  string? app_id = null;
+  string? language_hint = null;
+  string? whisper_cpp_binary = null;
+  string? whisper_model_path = null;
+};
+
+dictionary DictateResult {
+  string session_id;
+  string raw_text;
+  string final_text;
+};

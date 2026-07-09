@@ -1,0 +1,21 @@
+# Rust
+/core/target/
+**/*.rs.bk
+
+# Swift / Xcode
+/apps/macos/.build/
+**/.DS_Store
+**/xcuserdata/
+**/*.xcworkspace/xcuserdata/
+
+# Models (large binaries)
+/models/*.bin
+/models/*.mlmodelc/
+/models/*.mlpackage/
+
+# Local secrets
+.env
+.env.*
+
+# SQLite (local dev)
+*.sqlite3
