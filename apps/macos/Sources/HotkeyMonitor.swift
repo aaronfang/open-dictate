@@ -3,40 +3,42 @@ import AppKit
 final class HotkeyMonitor {
     struct Hotkey {
         var keyCode: CGKeyCode
-        var flags: CGEventFlags
     }
 
     private let hotkey: Hotkey
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var isPressed = false
 
     var onHotkeyDown: (() -> Void)?
     var onHotkeyUp: (() -> Void)?
-
-    private var isPressed = false
+    private(set) var isActive = false
 
     init(hotkey: Hotkey) {
         self.hotkey = hotkey
     }
 
     func start() {
-        let mask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
+        guard eventTap == nil else { return }
 
-        let callback: CGEventTapCallBack = { proxy, type, event, refcon in
+        let mask = (1 << CGEventType.flagsChanged.rawValue)
+            | (1 << CGEventType.keyUp.rawValue)
+
+        let callback: CGEventTapCallBack = { _, type, event, refcon in
             let monitor = Unmanaged<HotkeyMonitor>.fromOpaque(refcon!).takeUnretainedValue()
-            return monitor.handle(proxy: proxy, type: type, event: event)
+            return monitor.handle(type: type, event: event)
         }
 
         guard let tap = CGEvent.tapCreate(
-            tap: .cghidEventTap,
+            tap: .cgSessionEventTap,
             place: .headInsertEventTap,
-            options: .defaultTap,
+            options: .listenOnly,
             eventsOfInterest: CGEventMask(mask),
             callback: callback,
             userInfo: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
         ) else {
-            // 常见原因：未授予“辅助功能(Accessibility)”权限
             NSLog("Failed to create event tap. Check Accessibility permission.")
+            isActive = false
             return
         }
 
@@ -46,6 +48,8 @@ final class HotkeyMonitor {
             CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
         }
         CGEvent.tapEnable(tap: tap, enable: true)
+        isActive = true
+        NSLog("Hotkey monitor started for keyCode \(hotkey.keyCode)")
     }
 
     func stop() {
@@ -54,9 +58,11 @@ final class HotkeyMonitor {
         }
         runLoopSource = nil
         eventTap = nil
+        isPressed = false
+        isActive = false
     }
 
-    private func handle(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+    private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let tap = eventTap {
                 CGEvent.tapEnable(tap: tap, enable: true)
@@ -65,30 +71,33 @@ final class HotkeyMonitor {
         }
 
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
-        let flags = event.flags
-
-        let matches = keyCode == hotkey.keyCode && flags.contains(hotkey.flags)
-        if !matches {
+        guard keyCode == hotkey.keyCode else {
             return Unmanaged.passUnretained(event)
         }
 
         switch type {
-        case .keyDown:
-            if !isPressed {
-                isPressed = true
-                onHotkeyDown?()
-            }
+        case .flagsChanged:
+            // 每个 flagsChanged 对应该物理按键的一次按下/松开，不依赖聚合的 Option 标志位
+            setPressed(!isPressed)
         case .keyUp:
             if isPressed {
-                isPressed = false
-                onHotkeyUp?()
+                setPressed(false)
             }
         default:
             break
         }
 
-        // 不拦截键盘事件：返回原事件继续传递
         return Unmanaged.passUnretained(event)
     }
-}
 
+    private func setPressed(_ pressed: Bool) {
+        guard pressed != isPressed else { return }
+        isPressed = pressed
+        NSLog("Hotkey \(hotkey.keyCode) \(pressed ? "down" : "up")")
+
+        let callback = pressed ? onHotkeyDown : onHotkeyUp
+        DispatchQueue.main.async {
+            callback?()
+        }
+    }
+}

@@ -8,10 +8,17 @@
 **/xcuserdata/
 **/*.xcworkspace/xcuserdata/
 
+# IDE
+.vscode/
+*.code-workspace
+
 # Models (large binaries)
 /models/*.bin
 /models/*.mlmodelc/
 /models/*.mlpackage/
+/models/**/*.mlmodelc/
+/models/**/*.mlpackage/
+/models/**/.cache/
 
 # Local secrets
 .env

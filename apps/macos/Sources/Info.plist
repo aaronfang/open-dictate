@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>OpenDictate</string>
+    <key>CFBundleDisplayName</key>
+    <string>OpenDictate</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>OpenDictate 需要访问麦克风以进行语音输入与识别。</string>
+    <key>LSUIElement</key>
+    <true/>
+</dict>
+</plist>
