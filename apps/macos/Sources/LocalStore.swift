@@ -24,7 +24,7 @@ enum LocalStoreError: LocalizedError {
     }
 }
 
-/// Local SQLite store aligned with `core-store` dictionary schema.
+/// Local SQLite store aligned with `core-store` dictionary + app_profiles schema.
 final class LocalStore {
     private var db: OpaquePointer?
 
@@ -54,6 +54,8 @@ final class LocalStore {
             sqlite3_close(db)
         }
     }
+
+    // MARK: - Dictionary
 
     func listDictionary() throws -> [DictionaryEntry] {
         let sql = "SELECT phrase, replacement, updated_at_millis FROM dictionary ORDER BY phrase ASC"
@@ -103,6 +105,91 @@ final class LocalStore {
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             throw LocalStoreError.stepFailed(errmsg())
         }
+    }
+
+    // MARK: - App profiles
+
+    func listAppProfiles() throws -> [AppProfile] {
+        let sql = """
+        SELECT app_id, tone, settings_json, updated_at_millis
+        FROM app_profiles
+        ORDER BY app_id ASC
+        """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+
+        var profiles: [AppProfile] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            profiles.append(try readAppProfile(stmt))
+        }
+        return profiles
+    }
+
+    func getAppProfile(appId: String) throws -> AppProfile? {
+        let sql = """
+        SELECT app_id, tone, settings_json, updated_at_millis
+        FROM app_profiles WHERE app_id = ?
+        """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+
+        sqlite3_bind_text(stmt, 1, appId, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return try readAppProfile(stmt)
+    }
+
+    func upsertAppProfile(_ profile: AppProfile) throws {
+        let trimmedId = profile.appId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedId.isEmpty else { return }
+
+        let settingsData = try JSONEncoder().encode(profile.format)
+        let settingsJSON = String(data: settingsData, encoding: .utf8) ?? "{}"
+
+        let sql = """
+        INSERT INTO app_profiles (app_id, tone, settings_json, updated_at_millis)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(app_id) DO UPDATE SET
+          tone=excluded.tone,
+          settings_json=excluded.settings_json,
+          updated_at_millis=excluded.updated_at_millis
+        """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        sqlite3_bind_text(stmt, 1, trimmedId, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 2, profile.tone, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 3, settingsJSON, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int64(stmt, 4, now)
+
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw LocalStoreError.stepFailed(errmsg())
+        }
+    }
+
+    func deleteAppProfile(appId: String) throws {
+        let sql = "DELETE FROM app_profiles WHERE app_id = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+
+        sqlite3_bind_text(stmt, 1, appId, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw LocalStoreError.stepFailed(errmsg())
+        }
+    }
+
+    private func readAppProfile(_ stmt: OpaquePointer) throws -> AppProfile {
+        let appId = String(cString: sqlite3_column_text(stmt, 0))
+        let tone = String(cString: sqlite3_column_text(stmt, 1))
+        let settingsJSON = String(cString: sqlite3_column_text(stmt, 2))
+        let updated = sqlite3_column_int64(stmt, 3)
+
+        var format = AppProfileFormatSettings.empty
+        if let data = settingsJSON.data(using: .utf8) {
+            format = (try? JSONDecoder().decode(AppProfileFormatSettings.self, from: data)) ?? .empty
+        }
+
+        return AppProfile(appId: appId, tone: tone, format: format, updatedAtMillis: updated)
     }
 
     private func migrate() throws {

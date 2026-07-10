@@ -1,8 +1,10 @@
 import Foundation
 
 extension Notification.Name {
-    static let senseVoiceWarmedUp = Notification.Name("SenseVoiceWarmedUp")
+    static let senseVoiceLoadStarted = Notification.Name("SenseVoiceLoadStarted")
     static let senseVoiceLoaded = Notification.Name("SenseVoiceLoaded")
+    static let senseVoiceWarmedUp = Notification.Name("SenseVoiceWarmedUp")
+    static let senseVoiceLoadFailed = Notification.Name("SenseVoiceLoadFailed")
 }
 
 enum SenseVoiceConfig {

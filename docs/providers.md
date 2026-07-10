@@ -66,7 +66,21 @@ WHISPER_CPP_BIN=whisper-cli WHISPER_MODEL_PATH=/path/to/model.bin \
 
 当前实现：Ollama `/api/generate`（非流式）。
 
-### 3) `volcengine-llm`（云端，可选）
+### 3) `deepseek`（云端，可选，macOS Swift MVP）
+
+位置：`apps/macos/Sources/DeepSeekPostProcessor.swift`
+
+当前实现：DeepSeek OpenAI 兼容 `POST /chat/completions`（非流式）。默认关闭；仅发送转写文本，失败/超时回退规则结果。
+
+默认配置：
+
+- Base URL：`https://api.deepseek.com`
+- 模型：`deepseek-v4-flash`（可选 `deepseek-v4-pro`）
+- 鉴权：`Authorization: Bearer <API Key>`
+
+设置项在 macOS「文本润色」中配置。App 画像的 `tone` 会写入 prompt。
+
+### 4) `volcengine-llm`（云端，可选，Core）
 
 位置：`core/core-llm/src/volcengine_llm.rs`
 

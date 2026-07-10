@@ -6,6 +6,11 @@ final class TextInjector {
     private var targetApp: NSRunningApplication?
     private var focusedElement: AXUIElement?
 
+    /// Bundle ID of the app that was focused when recording started.
+    var targetBundleId: String? { targetApp?.bundleIdentifier }
+
+    var targetAppName: String? { targetApp?.localizedName }
+
     func rememberTarget() {
         guard let app = NSWorkspace.shared.frontmostApplication else {
             NSLog("TextInjector: no frontmost app")

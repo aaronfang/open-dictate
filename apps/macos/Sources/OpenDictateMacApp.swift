@@ -100,6 +100,17 @@ struct SettingsView: View {
     @State private var newReplacement = ""
     @State private var dictionaryError: String?
 
+    @State private var appProfiles: [AppProfile] = []
+    @State private var profileError: String?
+    @State private var editingProfile: AppProfile?
+    @State private var draftAppId = ""
+    @State private var draftDisplayName = ""
+    @State private var draftTonePreset: AppTonePreset = .neutral
+    @State private var draftCustomTone = ""
+    @State private var draftStripTrailingPeriod = false
+    @State private var draftSkipFillerRemoval = false
+    @State private var isAddingProfile = false
+
     init(statusController: StatusController = StatusController.shared) {
         self.statusController = statusController
     }
@@ -187,9 +198,37 @@ struct SettingsView: View {
 
             Section("文本润色") {
                 Toggle("规则后处理（去口癖 / 空白归一化）", isOn: $settings.enableRulesPostprocess)
-                Text("默认开启。识别结果会先套用个人词典，再按规则清理口癖与多余空白。")
+                Text("默认开启。流水线：词典 → 规则 → 可选 LLM → App 格式。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+
+                Toggle("DeepSeek 云端润色（仅发送文本）", isOn: $settings.enableDeepSeekPostprocess)
+                if settings.enableDeepSeekPostprocess {
+                    SecureField("API Key", text: $settings.deepSeekApiKey)
+                    TextField("Base URL", text: $settings.deepSeekBaseURL)
+                    Picker("模型", selection: $settings.deepSeekModel) {
+                        Text("deepseek-v4-flash（推荐，更快）").tag("deepseek-v4-flash")
+                        Text("deepseek-v4-pro").tag("deepseek-v4-pro")
+                    }
+                    HStack {
+                        Text("超时（秒）")
+                        TextField("", value: $settings.deepSeekTimeoutSeconds, format: .number)
+                            .frame(width: 56)
+                    }
+                    Toggle("保守润色（少改动）", isOn: $settings.deepSeekConservative)
+                    LabeledContent("出网类型") {
+                        Text("文本（识别结果）")
+                            .foregroundStyle(.orange)
+                    }
+                    Text("默认关闭。开启后仅把转写文本发往 DeepSeek；失败或超时会回退到规则结果并照常上屏。Key 存于本机 UserDefaults。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    if !settings.deepSeekConfigured {
+                        Text("请填写 API Key 后才会真正请求。")
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
+                }
             }
 
             Section("数据存储") {
@@ -235,13 +274,116 @@ struct SettingsView: View {
                         .disabled(newPhrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
+
+            Section("按应用的写法（App 画像）") {
+                Text("按目标 App 的 Bundle ID 套用语气与格式。开启 DeepSeek 时语气会写入 prompt；格式规则在 LLM 之后仍会生效。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                if let profileError {
+                    Text(profileError)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+
+                if appProfiles.isEmpty {
+                    Text("暂无画像。可添加微信口语、邮件正式、IDE 少改符号等配置。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(appProfiles) { profile in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(profile.resolvedDisplayName)
+                                    .fontWeight(.medium)
+                                Spacer()
+                                Text(profile.tonePreset.displayName)
+                                    .foregroundStyle(.secondary)
+                                Button("编辑") { beginEditProfile(profile) }
+                                    .buttonStyle(.borderless)
+                                Button(role: .destructive) {
+                                    deleteAppProfile(profile.appId)
+                                } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                            Text(profile.appId)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                            Text(profileFormatSummary(profile))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+
+                if isAddingProfile || editingProfile != nil {
+                    profileEditor
+                } else {
+                    HStack {
+                        Button("添加最近听写的 App") { addLastDictationAppProfile() }
+                        Button("手动添加") { beginAddProfile() }
+                    }
+                    Text("先在目标 App 里按住 Option 听写一次，再点「添加最近听写的 App」。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
             }
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(minWidth: 480, minHeight: 360)
-        .onAppear { reloadDictionary() }
-        .onChange(of: settings.storePath) { _, _ in reloadDictionary() }
+        .frame(minWidth: 520, minHeight: 420)
+        .onAppear { reloadAllStoreData() }
+        .onChange(of: settings.storePath) { _, _ in reloadAllStoreData() }
+    }
+
+    @ViewBuilder
+    private var profileEditor: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(editingProfile == nil ? "新建画像" : "编辑画像")
+                .fontWeight(.semibold)
+            TextField("Bundle ID", text: $draftAppId)
+                .disabled(editingProfile != nil)
+            TextField("显示名称（可选）", text: $draftDisplayName)
+            Picker("语气", selection: $draftTonePreset) {
+                ForEach(AppTonePreset.allCases) { preset in
+                    Text(preset.displayName).tag(preset)
+                }
+            }
+            if draftTonePreset == .custom {
+                TextField("自定义语气（将用于 LLM）", text: $draftCustomTone)
+            } else {
+                Text(draftTonePreset.defaultToneText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Toggle("聊天场景：去掉句末句号", isOn: $draftStripTrailingPeriod)
+            Toggle("开发工具：保留口癖、少做规则清理", isOn: $draftSkipFillerRemoval)
+            HStack {
+                Button("保存") { saveProfileDraft() }
+                    .disabled(draftAppId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button("取消") { cancelProfileEditor() }
+            }
+        }
+        .padding(8)
+        .background(.quaternary.opacity(0.4))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func profileFormatSummary(_ profile: AppProfile) -> String {
+        var parts: [String] = []
+        if profile.format.stripTrailingPeriod { parts.append("去句末句号") }
+        if profile.format.skipFillerRemoval { parts.append("少改口癖") }
+        if parts.isEmpty { return "格式：默认" }
+        return "格式：" + parts.joined(separator: " · ")
+    }
+
+    private func reloadAllStoreData() {
+        reloadDictionary()
+        reloadAppProfiles()
     }
 
     private func reloadDictionary() {
@@ -280,6 +422,124 @@ struct SettingsView: View {
             dictionaryError = error.localizedDescription
         }
     }
+
+    private func reloadAppProfiles() {
+        do {
+            let store = try LocalStore(path: settings.storePath)
+            appProfiles = try store.listAppProfiles()
+            profileError = nil
+        } catch {
+            appProfiles = []
+            profileError = error.localizedDescription
+        }
+    }
+
+    private func beginAddProfile() {
+        editingProfile = nil
+        isAddingProfile = true
+        draftAppId = ""
+        draftDisplayName = ""
+        draftTonePreset = .neutral
+        draftCustomTone = ""
+        draftStripTrailingPeriod = false
+        draftSkipFillerRemoval = false
+    }
+
+    private func beginEditProfile(_ profile: AppProfile) {
+        editingProfile = profile
+        isAddingProfile = false
+        draftAppId = profile.appId
+        draftDisplayName = profile.format.displayName
+        draftTonePreset = profile.tonePreset
+        draftCustomTone = profile.tonePreset == .custom ? profile.tone : ""
+        draftStripTrailingPeriod = profile.format.stripTrailingPeriod
+        draftSkipFillerRemoval = profile.format.skipFillerRemoval
+    }
+
+    private func cancelProfileEditor() {
+        editingProfile = nil
+        isAddingProfile = false
+    }
+
+    private func addLastDictationAppProfile() {
+        guard let bundleId = statusController.lastDictationBundleId, !bundleId.isEmpty else {
+            profileError = "还没有听写目标。请先切换到目标 App，按住 Option 听写一次后再添加。"
+            return
+        }
+
+        beginAddProfile()
+        draftAppId = bundleId
+        draftDisplayName = statusController.lastDictationAppName ?? ""
+        applySuggestedDefaults(for: bundleId)
+        isAddingProfile = true
+        profileError = nil
+    }
+
+    private func applySuggestedDefaults(for bundleId: String) {
+        let id = bundleId.lowercased()
+        if id.contains("wechat") || id.contains("xinwechat") || id.contains("slack") || id.contains("dingtalk") || id.contains("telegram") {
+            draftTonePreset = .casual
+            draftStripTrailingPeriod = true
+        } else if id.contains("mail") {
+            draftTonePreset = .formal
+        } else if id.contains("xcode") || id.contains("cursor") || id.contains("terminal") || id.contains("code") || id.contains("iterm") {
+            draftTonePreset = .neutral
+            draftSkipFillerRemoval = true
+        }
+    }
+
+    private func saveProfileDraft() {
+        let appId = draftAppId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !appId.isEmpty else { return }
+
+        let tone: String
+        switch draftTonePreset {
+        case .custom:
+            tone = draftCustomTone.trimmingCharacters(in: .whitespacesAndNewlines)
+            if tone.isEmpty {
+                profileError = "自定义语气不能为空"
+                return
+            }
+        default:
+            tone = draftTonePreset.defaultToneText
+        }
+
+        var format = AppProfileFormatSettings.empty
+        format.displayName = draftDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        format.stripTrailingPeriod = draftStripTrailingPeriod
+        format.skipFillerRemoval = draftSkipFillerRemoval
+
+        let profile = AppProfile(
+            appId: appId,
+            tone: tone,
+            format: format,
+            updatedAtMillis: 0
+        )
+
+        do {
+            let store = try LocalStore(path: settings.storePath)
+            try store.upsertAppProfile(profile)
+            appProfiles = try store.listAppProfiles()
+            profileError = nil
+            cancelProfileEditor()
+        } catch {
+            profileError = error.localizedDescription
+        }
+    }
+
+    private func deleteAppProfile(_ appId: String) {
+        do {
+            let store = try LocalStore(path: settings.storePath)
+            try store.deleteAppProfile(appId: appId)
+            appProfiles = try store.listAppProfiles()
+            profileError = nil
+            if editingProfile?.appId == appId {
+                cancelProfileEditor()
+            }
+        } catch {
+            profileError = error.localizedDescription
+        }
+    }
 }
 
 final class StatusController: NSObject, ObservableObject {
@@ -287,6 +547,8 @@ final class StatusController: NSObject, ObservableObject {
 
     private var item: NSStatusItem?
     private var statusMenu: NSMenu?
+    private var modelStatusMenuItem: NSMenuItem?
+    private var loadingSpinner: NSProgressIndicator?
     private let hotkey = HotkeyMonitor(hotkey: .init(keyCode: 61))
     private let recorder = AudioRecorder()
     private let transcriber = SpeechTranscriber()
@@ -295,15 +557,26 @@ final class StatusController: NSObject, ObservableObject {
     private let injector = TextInjector()
 
     @Published var hotkeyActive = false
+    private(set) var lastDictationBundleId: String?
+    private(set) var lastDictationAppName: String?
 
     var transcriberIsLoaded: Bool { transcriber.isSenseVoiceLoaded }
+
+    private enum ModelUIState {
+        case ready
+        case warming
+        case loading
+        case failed
+        case missingModels
+        case idle
+    }
 
     func probeTranscribe(wavPath: String) async {
         let url = URL(fileURLWithPath: wavPath)
         do {
             let raw = try await transcriber.transcribe(wavURL: url, settings: settings)
-            let text = TextIntelligence.process(raw, settings: settings)
-            NSLog("PROBE result raw=\(raw) final=\(text)")
+            let processed = await TextIntelligence.process(raw, settings: settings)
+            NSLog("PROBE result raw=\(raw) final=\(processed.text) llm=\(processed.llmApplied)")
         } catch {
             NSLog("PROBE failed: \(error.localizedDescription)")
         }
@@ -320,14 +593,26 @@ final class StatusController: NSObject, ObservableObject {
         )
         NotificationCenter.default.addObserver(
             self,
-            selector: #selector(senseVoiceLoaded),
+            selector: #selector(refreshModelStatusUI),
+            name: .senseVoiceLoadStarted,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(refreshModelStatusUI),
             name: .senseVoiceLoaded,
             object: nil
         )
         NotificationCenter.default.addObserver(
             self,
-            selector: #selector(senseVoiceWarmedUp),
+            selector: #selector(refreshModelStatusUI),
             name: .senseVoiceWarmedUp,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(refreshModelStatusUI),
+            name: .senseVoiceLoadFailed,
             object: nil
         )
 
@@ -335,9 +620,12 @@ final class StatusController: NSObject, ObservableObject {
             guard let self else { return }
             NSLog("Recording hotkey down")
             self.injector.rememberTarget()
+            self.lastDictationBundleId = self.injector.targetBundleId
+            self.lastDictationAppName = self.injector.targetAppName
             // Kick model load as early as possible (parallel with recording).
             if self.settings.sttEngine == .senseVoice, !self.transcriber.isSenseVoiceLoaded {
                 self.transcriber.preload(settings: self.settings)
+                self.refreshStatusAppearance()
                 self.hud.show(text: "正在录音（模型加载中）…")
             } else {
                 self.hud.show(text: "正在录音…")
@@ -378,7 +666,21 @@ final class StatusController: NSObject, ObservableObject {
                 }
                 do {
                     let raw = try await self.transcriber.transcribe(wavURL: wavURL, settings: self.settings)
-                    let text = TextIntelligence.process(raw, settings: self.settings)
+                    let appId = self.injector.targetBundleId
+                    if self.settings.enableDeepSeekPostprocess, self.settings.deepSeekConfigured {
+                        await MainActor.run {
+                            self.hud.show(text: "正在润色…")
+                        }
+                    }
+                    let processed = await TextIntelligence.process(raw, settings: self.settings, appId: appId)
+                    NSLog(
+                        "TextIntelligence app=%@ tone=%@ profile=%@ llm=%@",
+                        processed.appId ?? "nil",
+                        processed.tone ?? "none",
+                        processed.profileApplied ? "yes" : "no",
+                        processed.llmApplied ? "yes" : "no"
+                    )
+                    let text = processed.text
                     await MainActor.run {
                         self.hud.hide()
                         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -415,16 +717,20 @@ final class StatusController: NSObject, ObservableObject {
 
         hotkey.start()
         hotkeyActive = hotkey.isActive
+        // Auto-load SenseVoice at launch so the first dictation isn't blocked.
         transcriber.preload(settings: settings)
+        refreshStatusAppearance()
     }
 
     func stop() {
         hotkey.stop()
+        clearLoadingSpinner()
         if let item {
             NSStatusBar.system.removeStatusItem(item)
         }
         item = nil
         statusMenu = nil
+        modelStatusMenuItem = nil
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -432,16 +738,18 @@ final class StatusController: NSObject, ObservableObject {
         if let item {
             NSStatusBar.system.removeStatusItem(item)
         }
+        clearLoadingSpinner()
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let image = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "OpenDictate") {
-            image.isTemplate = true
-            item.button?.image = image
-        }
-        item.button?.toolTip = statusToolTip()
 
         let menu = NSMenu()
         menu.autoenablesItems = false
+
+        let modelStatus = NSMenuItem(title: "模型：…", action: nil, keyEquivalent: "")
+        modelStatus.isEnabled = false
+        menu.addItem(modelStatus)
+        modelStatusMenuItem = modelStatus
+        menu.addItem(.separator())
 
         let settingsItem = NSMenuItem(
             title: "Open Settings…",
@@ -466,6 +774,7 @@ final class StatusController: NSObject, ObservableObject {
         item.menu = menu
         self.item = item
         self.statusMenu = menu
+        refreshStatusAppearance()
     }
 
     @objc private func screenParametersChanged() {
@@ -473,24 +782,95 @@ final class StatusController: NSObject, ObservableObject {
         installStatusItem(menuTarget: menuTarget)
     }
 
-    @objc private func senseVoiceLoaded() {
-        item?.button?.toolTip = statusToolTip()
+    @objc private func refreshModelStatusUI() {
+        refreshStatusAppearance()
     }
 
-    @objc private func senseVoiceWarmedUp() {
-        item?.button?.toolTip = statusToolTip()
+    private func modelUIState() -> ModelUIState {
+        guard settings.sttEngine == .senseVoice else { return .idle }
+        guard settings.senseVoiceModelsReady else { return .missingModels }
+        if transcriber.isSenseVoiceWarmedUp { return .ready }
+        if transcriber.isSenseVoiceLoaded { return .warming }
+        if transcriber.didSenseVoiceLoadFail { return .failed }
+        return .loading
     }
 
-    private func statusToolTip() -> String {
-        if settings.sttEngine == .senseVoice, settings.senseVoiceModelsReady {
-            if transcriber.isSenseVoiceWarmedUp {
-                return "OpenDictate（就绪）"
-            }
-            if transcriber.isSenseVoiceLoaded {
-                return "OpenDictate（已加载，后台预热中…）"
-            }
-            return "OpenDictate（模型加载中…）"
+    private func refreshStatusAppearance() {
+        guard let button = item?.button else { return }
+        let state = modelUIState()
+        button.toolTip = statusToolTip(for: state)
+        modelStatusMenuItem?.title = modelStatusTitle(for: state)
+
+        switch state {
+        case .loading:
+            showLoadingSpinner(in: button)
+        case .warming:
+            clearLoadingSpinner()
+            setStatusSymbol("mic", on: button)
+        case .ready, .idle:
+            clearLoadingSpinner()
+            setStatusSymbol("mic.fill", on: button)
+        case .missingModels, .failed:
+            clearLoadingSpinner()
+            setStatusSymbol("mic.slash", on: button)
         }
-        return "OpenDictate"
+    }
+
+    private func setStatusSymbol(_ name: String, on button: NSStatusBarButton) {
+        if let image = NSImage(systemSymbolName: name, accessibilityDescription: "OpenDictate") {
+            image.isTemplate = true
+            button.image = image
+        }
+        button.title = ""
+    }
+
+    private func showLoadingSpinner(in button: NSStatusBarButton) {
+        if loadingSpinner == nil {
+            let spinner = NSProgressIndicator()
+            spinner.style = .spinning
+            spinner.controlSize = .small
+            spinner.isIndeterminate = true
+            spinner.translatesAutoresizingMaskIntoConstraints = false
+            button.addSubview(spinner)
+            NSLayoutConstraint.activate([
+                spinner.centerXAnchor.constraint(equalTo: button.centerXAnchor),
+                spinner.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+            ])
+            loadingSpinner = spinner
+        }
+        button.image = nil
+        button.title = ""
+        // Keep a stable click target while the spinner is showing.
+        item?.length = 28
+        loadingSpinner?.startAnimation(nil)
+    }
+
+    private func clearLoadingSpinner() {
+        loadingSpinner?.stopAnimation(nil)
+        loadingSpinner?.removeFromSuperview()
+        loadingSpinner = nil
+        item?.length = NSStatusItem.variableLength
+    }
+
+    private func modelStatusTitle(for state: ModelUIState) -> String {
+        switch state {
+        case .loading: return "模型：加载中…"
+        case .warming: return "模型：已加载（预热中）"
+        case .ready: return "模型：就绪"
+        case .failed: return "模型：加载失败"
+        case .missingModels: return "模型：未下载"
+        case .idle: return "引擎：whisper.cpp"
+        }
+    }
+
+    private func statusToolTip(for state: ModelUIState) -> String {
+        switch state {
+        case .loading: return "OpenDictate（模型加载中…）"
+        case .warming: return "OpenDictate（已加载，后台预热中…）"
+        case .ready: return "OpenDictate（就绪）"
+        case .failed: return "OpenDictate（模型加载失败）"
+        case .missingModels: return "OpenDictate（SenseVoice 模型未下载）"
+        case .idle: return "OpenDictate"
+        }
     }
 }

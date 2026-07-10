@@ -24,6 +24,30 @@ final class AppSettings: ObservableObject {
     /// Rule-based post-process (filler removal + whitespace normalize). Default on.
     @AppStorage("enableRulesPostprocess") var enableRulesPostprocess: Bool = true
 
+    /// Optional DeepSeek cloud polish (text only). Default off — local-first.
+    @AppStorage("enableDeepSeekPostprocess") var enableDeepSeekPostprocess: Bool = false
+    @AppStorage("deepSeekApiKey") var deepSeekApiKey: String = ""
+    @AppStorage("deepSeekBaseURL") var deepSeekBaseURL: String = "https://api.deepseek.com"
+    @AppStorage("deepSeekModel") var deepSeekModel: String = "deepseek-v4-flash"
+    /// Seconds; on timeout/error fall back to pre-LLM text.
+    @AppStorage("deepSeekTimeoutSeconds") var deepSeekTimeoutSeconds: Double = 8
+    /// Prefer minimal edits when polishing.
+    @AppStorage("deepSeekConservative") var deepSeekConservative: Bool = true
+
+    var deepSeekConfigured: Bool {
+        !deepSeekApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var deepSeekConfig: DeepSeekPostProcessor.Config {
+        DeepSeekPostProcessor.Config(
+            apiKey: deepSeekApiKey,
+            baseURL: deepSeekBaseURL,
+            model: deepSeekModel,
+            timeoutSeconds: deepSeekTimeoutSeconds,
+            conservative: deepSeekConservative
+        )
+    }
+
     var sttEngine: STTEngine {
         get { STTEngine(rawValue: sttEngineRaw) ?? .senseVoice }
         set { sttEngineRaw = newValue.rawValue }

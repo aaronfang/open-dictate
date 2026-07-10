@@ -17,7 +17,7 @@ final class SettingsWindowController {
         // Avoid NSHostingView ↔ Auto Layout size feedback loop that crashes
         // `_postWindowNeedsUpdateConstraints` when Form content grows.
         hosting.sizingOptions = []
-        hosting.frame = NSRect(x: 0, y: 0, width: 560, height: 560)
+        hosting.frame = NSRect(x: 0, y: 0, width: 560, height: 640)
 
         let window = NSWindow(
             contentRect: hosting.frame,

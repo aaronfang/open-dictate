@@ -7,13 +7,78 @@ enum TextIntelligence {
         "额", "嗯", "呃", "你知道",
     ]
 
-    /// Dictionary replace → optional rule post-process. Mirrors Core pipeline order.
-    static func process(_ raw: String, settings: AppSettings) -> String {
+    struct ProcessResult {
+        let text: String
+        /// Resolved per-app tone for LLM style hint.
+        let tone: String?
+        let appId: String?
+        let profileApplied: Bool
+        let llmApplied: Bool
+    }
+
+    /// Dictionary → rules → optional DeepSeek LLM → app-profile format.
+    static func process(
+        _ raw: String,
+        settings: AppSettings,
+        appId: String? = nil
+    ) async -> ProcessResult {
+        let profile = loadProfile(appId: appId, storePath: settings.storePath)
+        let tone = profile?.tone
+
         var text = applyDictionary(raw, storePath: settings.storePath)
+
+        let skipFillers = profile?.format.skipFillerRemoval == true
         if settings.enableRulesPostprocess {
-            text = applyRules(text)
+            text = applyRules(text, removeFillers: !skipFillers)
         }
-        return text
+
+        var llmApplied = false
+        if settings.enableDeepSeekPostprocess {
+            if !settings.deepSeekConfigured {
+                NSLog("TextIntelligence DeepSeek skipped: API Key 未配置")
+            } else if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                // nothing to polish
+            } else {
+                do {
+                    let polished = try await DeepSeekPostProcessor.process(
+                        text,
+                        tone: tone,
+                        config: settings.deepSeekConfig
+                    )
+                    text = polished
+                    llmApplied = true
+                    NSLog(
+                        "TextIntelligence DeepSeek ok model=%@ tone=%@",
+                        settings.deepSeekModel,
+                        tone ?? "default"
+                    )
+                } catch {
+                    NSLog("TextIntelligence DeepSeek fallback: \(error.localizedDescription)")
+                }
+            }
+        }
+
+        if let profile {
+            text = applyProfileFormat(text, format: profile.format)
+        }
+
+        return ProcessResult(
+            text: text,
+            tone: tone,
+            appId: appId,
+            profileApplied: profile != nil,
+            llmApplied: llmApplied
+        )
+    }
+
+    static func loadProfile(appId: String?, storePath: String) -> AppProfile? {
+        guard let appId, !appId.isEmpty else { return nil }
+        do {
+            return try LocalStore(path: storePath).getAppProfile(appId: appId)
+        } catch {
+            NSLog("TextIntelligence profile lookup skipped: \(error.localizedDescription)")
+            return nil
+        }
     }
 
     static func applyDictionary(_ input: String, storePath: String) -> String {
@@ -30,9 +95,20 @@ enum TextIntelligence {
         }
     }
 
-    static func applyRules(_ input: String) -> String {
-        var text = removeFillers(input)
+    static func applyRules(_ input: String, removeFillers: Bool = true) -> String {
+        var text = input
+        if removeFillers {
+            text = Self.removeFillers(text)
+        }
         text = normalizeWhitespace(text)
+        return text
+    }
+
+    static func applyProfileFormat(_ input: String, format: AppProfileFormatSettings) -> String {
+        var text = input
+        if format.stripTrailingPeriod {
+            text = stripTrailingPeriod(text)
+        }
         return text
     }
 
@@ -48,5 +124,13 @@ enum TextIntelligence {
 
     private static func normalizeWhitespace(_ s: String) -> String {
         s.split { $0.isWhitespace }.joined(separator: " ")
+    }
+
+    private static func stripTrailingPeriod(_ s: String) -> String {
+        var text = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        while text.hasSuffix("。") || text.hasSuffix(".") || text.hasSuffix("．") {
+            text = String(text.dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return text
     }
 }

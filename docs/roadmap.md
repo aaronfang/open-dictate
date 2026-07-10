@@ -23,8 +23,8 @@
 | 权限引导 | 已完成 | 麦克风 / 辅助功能 |
 | 设置窗口 | 进行中 | 引擎与路径可配；词典 UI 已接入（Swift MVP） |
 | Rust Core / UniFFI | 进行中 | crate 与 Pipeline 已有；macOS 未完整接入打包 |
-| 规则润色 / 词典 / App 画像 | 进行中 | 规则+词典：Swift MVP 已接听写；App 画像仍计划中；P3 收敛 Core |
-| 本地/云端 LLM 润色 | 计划中 | Ollama / 火山骨架 |
+| 规则润色 / 词典 / App 画像 | 已完成 | 规则+词典+App 画像：Swift MVP 已接听写；P3 收敛 Core |
+| 本地/云端 LLM 润色 | 进行中 | DeepSeek 云端（Swift MVP）已接；Ollama 待做 |
 | 嘈杂环境降噪 | 计划中 | 见 P1 |
 | 跨平台客户端 | 远期 | UniFFI 预留 |
 
@@ -58,9 +58,9 @@
 
 - [x] 规则后处理默认开启（去口癖、空白归一化）— Swift MVP；P3 收敛 `core/core-llm` rules
 - [x] 个人词典管理 UI + 本地 SQLite（schema 对齐 `core-store` `dictionary`；P3 收敛 Core）
-- [ ] 按 App 画像（语气 / 格式）UI + `app_profiles`
+- [x] 按 App 画像（语气 / 格式）UI + 本地 `app_profiles`（Swift MVP；P3 收敛 Core）
+- [x] 可选云端 LLM 润色（DeepSeek / OpenAI 兼容）；UI 明示出网为「文本」— Swift MVP
 - [ ] 可选本地 LLM 润色（Ollama）
-- [ ] 可选云端 LLM 润色（火山 / OpenAI 兼容）；UI 明示出网为「文本」
 
 ### P3 — 架构收敛
 
@@ -126,9 +126,10 @@
 |------|------|------|
 | 规则去口癖 | 已完成 | Swift MVP；Core 有同款逻辑待收敛 |
 | 个人词典 | 已完成 | 设置页 CRUD + 听写替换；SQLite 对齐 Core schema |
-| App 画像 | 计划中 | Store 有表；无 UI |
+| App 画像 | 已完成 | 设置页 CRUD；听写按 Bundle ID 套用语气/格式；tone 写入 LLM prompt |
+| DeepSeek 润色 | 已完成 | Swift MVP；默认关；失败回退规则结果 |
 | Ollama 润色 | 计划中 | Core 骨架 |
-| 云端 LLM 润色 | 计划中 | Core 骨架 |
+| 云端 LLM 润色（火山等） | 计划中 | Core 骨架 |
 
 ### 存储、隐私与分发
 

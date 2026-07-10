@@ -27,6 +27,9 @@ final class SpeechTranscriber {
     private var warmupTask: Task<Void, Never>?
     private(set) var isSenseVoiceLoaded = false
     private(set) var isSenseVoiceWarmedUp = false
+    private(set) var didSenseVoiceLoadFail = false
+    /// True while a SenseVoice load Task is in flight.
+    var isSenseVoiceLoading: Bool { loadTask != nil && !isSenseVoiceLoaded }
 
     func transcribe(wavURL: URL, settings: AppSettings) async throws -> String {
         switch settings.sttEngine {
@@ -45,6 +48,8 @@ final class SpeechTranscriber {
 
         isSenseVoiceLoaded = false
         isSenseVoiceWarmedUp = false
+        didSenseVoiceLoadFail = false
+        NotificationCenter.default.post(name: .senseVoiceLoadStarted, object: nil)
 
         loadTask = Task { [weak self] in
             guard let self else { return }
@@ -59,7 +64,11 @@ final class SpeechTranscriber {
                 }
                 NSLog("SpeechTranscriber: SenseVoice loaded in %.1fs", elapsed)
             } catch {
-                await MainActor.run { self.loadTask = nil }
+                await MainActor.run {
+                    self.loadTask = nil
+                    self.didSenseVoiceLoadFail = true
+                    NotificationCenter.default.post(name: .senseVoiceLoadFailed, object: nil)
+                }
                 NSLog("SpeechTranscriber: SenseVoice load failed: \(error)")
                 throw error
             }
@@ -184,6 +193,7 @@ final class SpeechTranscriber {
         senseVoiceCacheKey = nil
         isSenseVoiceLoaded = false
         isSenseVoiceWarmedUp = false
+        didSenseVoiceLoadFail = false
         loadTask?.cancel()
         warmupTask?.cancel()
         loadTask = nil
