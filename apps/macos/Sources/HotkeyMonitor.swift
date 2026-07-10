@@ -1,11 +1,7 @@
 import AppKit
 
 final class HotkeyMonitor {
-    struct Hotkey {
-        var keyCode: CGKeyCode
-    }
-
-    private let hotkey: Hotkey
+    private var keyCode: CGKeyCode
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var isPressed = false
@@ -14,14 +10,27 @@ final class HotkeyMonitor {
     var onHotkeyUp: (() -> Void)?
     private(set) var isActive = false
 
-    init(hotkey: Hotkey) {
-        self.hotkey = hotkey
+    init(keyCode: CGKeyCode = DictationHotkey.defaultKeyCode) {
+        self.keyCode = keyCode
+    }
+
+    func update(keyCode: CGKeyCode) {
+        let wasActive = isActive
+        if wasActive {
+            stop()
+        }
+        self.keyCode = keyCode
+        isPressed = false
+        if wasActive {
+            start()
+        }
     }
 
     func start() {
         guard eventTap == nil else { return }
 
         let mask = (1 << CGEventType.flagsChanged.rawValue)
+            | (1 << CGEventType.keyDown.rawValue)
             | (1 << CGEventType.keyUp.rawValue)
 
         let callback: CGEventTapCallBack = { _, type, event, refcon in
@@ -29,10 +38,11 @@ final class HotkeyMonitor {
             return monitor.handle(type: type, event: event)
         }
 
+        // defaultTap so regular keys used as PTT can be consumed (no typed characters).
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
-            options: .listenOnly,
+            options: .defaultTap,
             eventsOfInterest: CGEventMask(mask),
             callback: callback,
             userInfo: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
@@ -49,16 +59,23 @@ final class HotkeyMonitor {
         }
         CGEvent.tapEnable(tap: tap, enable: true)
         isActive = true
-        NSLog("Hotkey monitor started for keyCode \(hotkey.keyCode)")
+        NSLog("Hotkey monitor started for keyCode \(keyCode)")
     }
 
     func stop() {
         if let src = runLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), src, .commonModes)
         }
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+        }
         runLoopSource = nil
         eventTap = nil
-        isPressed = false
+        if isPressed {
+            isPressed = false
+            let callback = onHotkeyUp
+            DispatchQueue.main.async { callback?() }
+        }
         isActive = false
     }
 
@@ -70,19 +87,31 @@ final class HotkeyMonitor {
             return Unmanaged.passUnretained(event)
         }
 
-        let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
-        guard keyCode == hotkey.keyCode else {
+        let eventKeyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+        guard eventKeyCode == keyCode else {
             return Unmanaged.passUnretained(event)
         }
 
+        let hotkey = DictationHotkey(keyCode: UInt16(keyCode))
+
         switch type {
         case .flagsChanged:
-            // 每个 flagsChanged 对应该物理按键的一次按下/松开，不依赖聚合的 Option 标志位
-            setPressed(!isPressed)
-        case .keyUp:
-            if isPressed {
-                setPressed(false)
+            guard hotkey.isModifier else { break }
+            setPressed(Self.modifierFlagIsDown(keyCode: eventKeyCode, flags: event.flags))
+            return Unmanaged.passUnretained(event)
+
+        case .keyDown:
+            guard !hotkey.isModifier else { break }
+            if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+                setPressed(true)
             }
+            return nil
+
+        case .keyUp:
+            guard !hotkey.isModifier else { break }
+            setPressed(false)
+            return nil
+
         default:
             break
         }
@@ -90,10 +119,27 @@ final class HotkeyMonitor {
         return Unmanaged.passUnretained(event)
     }
 
+    private static func modifierFlagIsDown(keyCode: CGKeyCode, flags: CGEventFlags) -> Bool {
+        switch keyCode {
+        case 58, 61:
+            return flags.contains(.maskAlternate)
+        case 59, 62:
+            return flags.contains(.maskControl)
+        case 56, 60:
+            return flags.contains(.maskShift)
+        case 55, 54:
+            return flags.contains(.maskCommand)
+        case 63:
+            return flags.contains(.maskSecondaryFn)
+        default:
+            return false
+        }
+    }
+
     private func setPressed(_ pressed: Bool) {
         guard pressed != isPressed else { return }
         isPressed = pressed
-        NSLog("Hotkey \(hotkey.keyCode) \(pressed ? "down" : "up")")
+        NSLog("Hotkey \(keyCode) \(pressed ? "down" : "up")")
 
         let callback = pressed ? onHotkeyDown : onHotkeyUp
         DispatchQueue.main.async {

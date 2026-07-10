@@ -24,8 +24,11 @@ final class AppSettings: ObservableObject {
     /// Rule-based post-process (filler removal + whitespace normalize). Default on.
     @AppStorage("enableRulesPostprocess") var enableRulesPostprocess: Bool = true
 
-    /// Optional DeepSeek cloud polish (text only). Default off — local-first.
+    /// LLM polish provider: off / local / deepseek. Empty means migrate from legacy toggles.
+    @AppStorage("llmPolishProvider") var llmPolishProviderRaw: String = ""
+    /// Legacy toggle kept for one-time migration.
     @AppStorage("enableDeepSeekPostprocess") var enableDeepSeekPostprocess: Bool = false
+
     @AppStorage("deepSeekApiKey") var deepSeekApiKey: String = ""
     @AppStorage("deepSeekBaseURL") var deepSeekBaseURL: String = "https://api.deepseek.com"
     @AppStorage("deepSeekModel") var deepSeekModel: String = "deepseek-v4-flash"
@@ -33,6 +36,47 @@ final class AppSettings: ObservableObject {
     @AppStorage("deepSeekTimeoutSeconds") var deepSeekTimeoutSeconds: Double = 8
     /// Prefer minimal edits when polishing.
     @AppStorage("deepSeekConservative") var deepSeekConservative: Bool = true
+
+    @AppStorage("localLLMTimeoutSeconds") var localLLMTimeoutSeconds: Double = 30
+    @AppStorage("localLLMConservative") var localLLMConservative: Bool = true
+
+    /// Push-to-talk hardware key code. Default: right Option (61).
+    @AppStorage("dictationHotkeyKeyCode") var dictationHotkeyKeyCode: Int = Int(DictationHotkey.defaultKeyCode)
+
+    var dictationHotkey: DictationHotkey {
+        get {
+            let code = UInt16(clamping: dictationHotkeyKeyCode)
+            return DictationHotkey(keyCode: DictationHotkey.isAllowed(code) ? code : DictationHotkey.defaultKeyCode)
+        }
+        set {
+            dictationHotkeyKeyCode = Int(newValue.keyCode)
+        }
+    }
+
+    var llmPolishProvider: LLMPolishProvider {
+        get {
+            if llmPolishProviderRaw.isEmpty {
+                return enableDeepSeekPostprocess ? .deepseek : .off
+            }
+            return LLMPolishProvider.resolve(stored: llmPolishProviderRaw)
+        }
+        set {
+            llmPolishProviderRaw = newValue.rawValue
+            enableDeepSeekPostprocess = (newValue == .deepseek)
+        }
+    }
+
+    /// Call once at launch / settings open so legacy users keep their choice.
+    func migrateLLMProviderIfNeeded() {
+        if llmPolishProviderRaw == "ollama" {
+            llmPolishProviderRaw = LLMPolishProvider.local.rawValue
+            return
+        }
+        guard llmPolishProviderRaw.isEmpty else { return }
+        llmPolishProviderRaw = enableDeepSeekPostprocess
+            ? LLMPolishProvider.deepseek.rawValue
+            : LLMPolishProvider.off.rawValue
+    }
 
     var deepSeekConfigured: Bool {
         !deepSeekApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -65,4 +109,6 @@ final class AppSettings: ObservableObject {
         ]
         return paths.allSatisfy { FileManager.default.fileExists(atPath: $0) }
     }
+
+    var localLLMReady: Bool { LocalLLMAssets.isReady }
 }

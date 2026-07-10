@@ -127,46 +127,72 @@ final class SenseVoiceCoreMLProvider {
     func warmup() throws {
         let samples = [Float](repeating: 0, count: 8_000)
         let features = try runPreprocessor(audio: samples)
-        _ = try runEncoder(features: features)
+        _ = try runEncoder(features: features, language: language, textNorm: textNorm)
     }
 
     func transcribe(wavURL: URL) throws -> String {
         var audio = try WavConverter.loadFloat32Mono16k(url: wavURL)
         let rawCount = audio.count
-        audio = WavConverter.trimSilence(audio)
-        audio = WavConverter.peakNormalize(audio)
+        let trimmed = WavConverter.trimSilence(audio)
+        let normalized = WavConverter.peakNormalize(trimmed)
         NSLog(
             "SenseVoice: audio frames raw=%d trimmed=%d (%.2fs @16k)",
             rawCount,
-            audio.count,
-            Double(audio.count) / Double(SenseVoiceConfig.sampleRate)
+            trimmed.count,
+            Double(trimmed.count) / Double(SenseVoiceConfig.sampleRate)
         )
 
-        do {
-            return try transcribe(waveformFloat32: audio)
-        } catch SenseVoiceCoreMLError.emptyResult, SenseVoiceCoreMLError.noSpeech {
-            // Retry 1: refresh ANE after long idle.
-            NSLog("SenseVoice: empty/nospeech — re-warmup and retry")
-            try warmup()
+        let attempts: [(label: String, samples: [Float], language: Int32?, textNorm: Int32?)] = [
+            ("peakNorm", normalized, nil, nil),
+            ("warmup+peakNorm", normalized, nil, nil),
+            ("noPeakNorm", trimmed, nil, nil),
+            ("woitn", trimmed, nil, SenseVoiceConfig.textNormEmbedIndex(enableITN: false)),
+            ("auto+woitn", trimmed, SenseVoiceConfig.languageEmbedIndex("auto"), SenseVoiceConfig.textNormEmbedIndex(enableITN: false)),
+            ("rawNoTrim", audio, nil, SenseVoiceConfig.textNormEmbedIndex(enableITN: false)),
+        ]
+
+        var lastError: Error = SenseVoiceCoreMLError.noSpeech
+        for (index, attempt) in attempts.enumerated() {
+            if index == 1 {
+                NSLog("SenseVoice: empty/nospeech — re-warmup and retry")
+                try warmup()
+            } else if index > 0 {
+                NSLog("SenseVoice: retry \(attempt.label)")
+            }
             do {
-                return try transcribe(waveformFloat32: audio)
-            } catch SenseVoiceCoreMLError.emptyResult, SenseVoiceCoreMLError.noSpeech {
-                // Retry 2: without peak-normalize (quiet room + normalize can hurt).
-                NSLog("SenseVoice: retry without peakNormalize")
-                var rawAudio = try WavConverter.loadFloat32Mono16k(url: wavURL)
-                rawAudio = WavConverter.trimSilence(rawAudio)
-                return try transcribe(waveformFloat32: rawAudio)
+                return try transcribe(
+                    waveformFloat32: attempt.samples,
+                    languageOverride: attempt.language,
+                    textNormOverride: attempt.textNorm
+                )
+            } catch let error as SenseVoiceCoreMLError {
+                switch error {
+                case .noSpeech, .emptyResult:
+                    lastError = error
+                    continue
+                default:
+                    throw error
+                }
             }
         }
+        throw lastError
     }
 
-    func transcribe(waveformFloat32 audio: [Float]) throws -> String {
+    func transcribe(
+        waveformFloat32 audio: [Float],
+        languageOverride: Int32? = nil,
+        textNormOverride: Int32? = nil
+    ) throws -> String {
         guard !audio.isEmpty else {
             throw SenseVoiceCoreMLError.emptyResult
         }
 
         let features = try runPreprocessor(audio: audio)
-        let (logits, validFrames) = try runEncoder(features: features)
+        let (logits, validFrames) = try runEncoder(
+            features: features,
+            language: languageOverride ?? language,
+            textNorm: textNormOverride ?? textNorm
+        )
         let decoded = decode(logits: logits, validFrames: validFrames)
         NSLog(
             "SenseVoice: decode raw=%@ text=%@ nospeech=%@ garbage=%@",
@@ -185,7 +211,26 @@ final class SenseVoiceCoreMLProvider {
             NSLog("SenseVoice: treating punctuation-only as empty: \(decoded.text)")
             throw SenseVoiceCoreMLError.noSpeech
         }
+        let seconds = Double(audio.count) / Double(SenseVoiceConfig.sampleRate)
+        if Self.isImplausiblyShort(decoded.text, audioSeconds: seconds) {
+            NSLog(
+                "SenseVoice: treating implausibly short result as empty: \"%@\" for %.1fs audio",
+                decoded.text,
+                seconds
+            )
+            throw SenseVoiceCoreMLError.noSpeech
+        }
         return decoded.text
+    }
+
+    /// Long utterance but only 1–2 content chars — usually a failed decode, not real speech.
+    private static func isImplausiblyShort(_ text: String, audioSeconds: Double) -> Bool {
+        let content = text.filter { ch in
+            !ch.isWhitespace && !ch.isPunctuation && !ch.isNewline
+        }
+        if audioSeconds >= 8, content.count < 6 { return true }
+        if audioSeconds >= 3, content.count < 3 { return true }
+        return false
     }
 
     /// "。" / "…" / mixed punctuation with no real content — common withitn on silence.
@@ -217,7 +262,11 @@ final class SenseVoiceCoreMLProvider {
         return features
     }
 
-    private func runEncoder(features: MLMultiArray) throws -> (MLMultiArray, Int) {
+    private func runEncoder(
+        features: MLMultiArray,
+        language: Int32,
+        textNorm: Int32
+    ) throws -> (MLMultiArray, Int) {
         var frameCount = features.shape[1].intValue
         if frameCount > SenseVoiceConfig.maxFrames {
             frameCount = SenseVoiceConfig.maxFrames

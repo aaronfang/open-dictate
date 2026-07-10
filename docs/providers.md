@@ -60,11 +60,19 @@ WHISPER_CPP_BIN=whisper-cli WHISPER_MODEL_PATH=/path/to/model.bin \
 
 功能：去除常见口头禅、空白归一化（MVP）。
 
-### 2) `local-llm`（本地，可选）
+### 2) `local-llm`（本地，可选，macOS Swift MVP）
 
-位置：`core/core-llm/src/local_llm.rs`
+位置：
 
-当前实现：Ollama `/api/generate`（非流式）。
+- macOS：`apps/macos/Sources/LocalLLMManager.swift`、`LocalLLMAssets.swift`
+- Core 骨架（Ollama）：`core/core-llm/src/local_llm.rs`（未作为产品路径）
+
+实现：选择「本地模型」后，若资源缺失则自动下载：
+
+1. `llama-server` / `llama-cli`（llama.cpp release `b7375`，按 arch）
+2. `qwen2.5-3b-instruct-q4_k_m.gguf`（约 2GB）
+
+落盘目录：`~/Library/Application Support/OpenDictate/llm/`。优先从 **ModelScope** 拉取（国内更快），失败再回退 Hugging Face。推理通过本机 `llama-server`（`127.0.0.1:18765`，OpenAI 兼容 Chat Completions），模型常驻内存。菜单栏与设置页显示下载字节进度；失败/超时回退规则结果。无需安装 Ollama。
 
 ### 3) `deepseek`（云端，可选，macOS Swift MVP）
 
@@ -78,7 +86,7 @@ WHISPER_CPP_BIN=whisper-cli WHISPER_MODEL_PATH=/path/to/model.bin \
 - 模型：`deepseek-v4-flash`（可选 `deepseek-v4-pro`）
 - 鉴权：`Authorization: Bearer <API Key>`
 
-设置项在 macOS「文本润色」中配置。App 画像的 `tone` 会写入 prompt。
+设置项在 macOS「文本润色」中与本地模型三选一。App 画像的 `tone` 会写入 prompt。
 
 ### 4) `volcengine-llm`（云端，可选，Core）
 

@@ -14,16 +14,19 @@ enum TextIntelligence {
         let appId: String?
         let profileApplied: Bool
         let llmApplied: Bool
+        let llmProvider: LLMPolishProvider
     }
 
-    /// Dictionary → rules → optional DeepSeek LLM → app-profile format.
+    /// Dictionary → rules → optional LLM → app-profile format.
     static func process(
         _ raw: String,
         settings: AppSettings,
         appId: String? = nil
     ) async -> ProcessResult {
+        settings.migrateLLMProviderIfNeeded()
         let profile = loadProfile(appId: appId, storePath: settings.storePath)
         let tone = profile?.tone
+        let provider = settings.llmPolishProvider
 
         var text = applyDictionary(raw, storePath: settings.storePath)
 
@@ -33,28 +36,43 @@ enum TextIntelligence {
         }
 
         var llmApplied = false
-        if settings.enableDeepSeekPostprocess {
-            if !settings.deepSeekConfigured {
-                NSLog("TextIntelligence DeepSeek skipped: API Key 未配置")
-            } else if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                // nothing to polish
-            } else {
-                do {
-                    let polished = try await DeepSeekPostProcessor.process(
+        if provider != .off, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            do {
+                switch provider {
+                case .off:
+                    break
+                case .local:
+                    text = try await LocalLLMManager.shared.process(
+                        text,
+                        tone: tone,
+                        conservative: settings.localLLMConservative,
+                        timeoutSeconds: settings.localLLMTimeoutSeconds
+                    )
+                    llmApplied = true
+                    NSLog(
+                        "TextIntelligence LocalLLM ok model=%@ tone=%@",
+                        LocalLLMAssets.modelFileName,
+                        tone ?? "default"
+                    )
+                case .deepseek:
+                    guard settings.deepSeekConfigured else {
+                        NSLog("TextIntelligence DeepSeek skipped: API Key 未配置")
+                        break
+                    }
+                    text = try await DeepSeekPostProcessor.process(
                         text,
                         tone: tone,
                         config: settings.deepSeekConfig
                     )
-                    text = polished
                     llmApplied = true
                     NSLog(
                         "TextIntelligence DeepSeek ok model=%@ tone=%@",
                         settings.deepSeekModel,
                         tone ?? "default"
                     )
-                } catch {
-                    NSLog("TextIntelligence DeepSeek fallback: \(error.localizedDescription)")
                 }
+            } catch {
+                NSLog("TextIntelligence \(provider.rawValue) fallback: \(error.localizedDescription)")
             }
         }
 
@@ -67,7 +85,8 @@ enum TextIntelligence {
             tone: tone,
             appId: appId,
             profileApplied: profile != nil,
-            llmApplied: llmApplied
+            llmApplied: llmApplied,
+            llmProvider: provider
         )
     }
 

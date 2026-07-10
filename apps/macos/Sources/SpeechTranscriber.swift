@@ -34,10 +34,32 @@ final class SpeechTranscriber {
     func transcribe(wavURL: URL, settings: AppSettings) async throws -> String {
         switch settings.sttEngine {
         case .senseVoice:
-            return try await transcribeWithSenseVoice(wavURL: wavURL, settings: settings)
+            do {
+                return try await transcribeWithSenseVoice(wavURL: wavURL, settings: settings)
+            } catch let error as SenseVoiceCoreMLError {
+                switch error {
+                case .noSpeech, .emptyResult:
+                    if whisperFallbackAvailable(settings: settings) {
+                        NSLog("SpeechTranscriber: SenseVoice empty — falling back to whisper.cpp")
+                        return try await transcribeWithWhisper(wavURL: wavURL, settings: settings)
+                    }
+                    throw error
+                default:
+                    throw error
+                }
+            }
         case .whisper:
             return try await transcribeWithWhisper(wavURL: wavURL, settings: settings)
         }
+    }
+
+    private func whisperFallbackAvailable(settings: AppSettings) -> Bool {
+        let binary = NSString(string: settings.whisperBinary).expandingTildeInPath
+        let model = NSString(string: settings.whisperModelPath).expandingTildeInPath
+        let binaryOK = FileManager.default.isExecutableFile(atPath: binary)
+            || FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/whisper-cli")
+        let modelOK = FileManager.default.fileExists(atPath: model)
+        return binaryOK && modelOK
     }
 
     /// Load models at launch; ANE warmup continues in background and must not block dictation.

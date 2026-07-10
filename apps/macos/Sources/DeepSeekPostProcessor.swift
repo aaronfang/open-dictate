@@ -48,18 +48,6 @@ enum DeepSeekPostProcessor {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(trimmedKey)", forHTTPHeaderField: "Authorization")
 
-        let toneHint = (tone?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
-            ?? "中性书面，清晰自然"
-        let conservativeHint = config.conservative ? "尽量少改动，只做必要清理" : "可以适度润色，使表达更顺畅"
-        let system = "你是听写文本整理助手。只输出整理后的最终文本，不要解释、不要加引号、不要加前后缀。"
-        let user = """
-        请把下面的口语转写整理成更自然、清晰的文字。
-        要求：删除口头禅与无意义重复，保留原意不新增事实，补全基础标点；风格参考：\(toneHint)；\(conservativeHint)。
-
-        文本：
-        \(text)
-        """
-
         let body: [String: Any] = [
             "model": config.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? "deepseek-v4-flash"
@@ -67,8 +55,15 @@ enum DeepSeekPostProcessor {
             "temperature": 0.2,
             "stream": false,
             "messages": [
-                ["role": "system", "content": system],
-                ["role": "user", "content": user],
+                ["role": "system", "content": LLMPolishPrompt.system],
+                [
+                    "role": "user",
+                    "content": LLMPolishPrompt.user(
+                        text: text,
+                        tone: tone,
+                        conservative: config.conservative
+                    ),
+                ],
             ],
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)

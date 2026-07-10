@@ -92,464 +92,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-struct SettingsView: View {
-    @StateObject private var settings = AppSettings()
-    @ObservedObject var statusController: StatusController
-    @State private var dictionaryEntries: [DictionaryEntry] = []
-    @State private var newPhrase = ""
-    @State private var newReplacement = ""
-    @State private var dictionaryError: String?
-
-    @State private var appProfiles: [AppProfile] = []
-    @State private var profileError: String?
-    @State private var editingProfile: AppProfile?
-    @State private var draftAppId = ""
-    @State private var draftDisplayName = ""
-    @State private var draftTonePreset: AppTonePreset = .neutral
-    @State private var draftCustomTone = ""
-    @State private var draftStripTrailingPeriod = false
-    @State private var draftSkipFillerRemoval = false
-    @State private var isAddingProfile = false
-
-    init(statusController: StatusController = StatusController.shared) {
-        self.statusController = statusController
-    }
-
-    var body: some View {
-        ScrollView {
-            Form {
-            Section("权限") {
-                LabeledContent("麦克风") {
-                    Text(Permissions.isMicrophoneGranted ? "已授权" : "未授权")
-                        .foregroundStyle(Permissions.isMicrophoneGranted ? .green : .orange)
-                }
-                LabeledContent("辅助功能") {
-                    Text(Permissions.isAccessibilityGranted ? "已授权" : "未授权")
-                        .foregroundStyle(Permissions.isAccessibilityGranted ? .green : .orange)
-                }
-                Text("通过 swift run 运行时，系统设置中显示为 OpenDictateMac，路径：")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                Text(Permissions.executablePath)
-                    .font(.footnote.monospaced())
-                    .textSelection(.enabled)
-                HStack {
-                    Button("打开麦克风设置") { Permissions.openMicrophoneSettings() }
-                    Button("打开辅助功能设置") { Permissions.openAccessibilitySettings() }
-                }
-            }
-
-            Section("热键") {
-                LabeledContent("默认热键") {
-                    Text("右 Option（按住说话）")
-                }
-                LabeledContent("热键监听") {
-                    Text(statusController.hotkeyActive ? "已启动" : "未启动（请检查辅助功能授权）")
-                        .foregroundStyle(statusController.hotkeyActive ? .green : .orange)
-                }
-                Text("提示：全局热键与文本注入需要在“隐私与安全性 → 辅助功能(Accessibility)”中授权本 App。")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                Text("双屏用户：若菜单栏图标只出现在某一块屏幕，请在“系统设置 → 桌面与程序坞”中开启“显示器具有单独的空间”，或为菜单栏指定主显示器。")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("语音识别") {
-                Picker("识别引擎", selection: $settings.sttEngineRaw) {
-                    ForEach(STTEngine.allCases) { engine in
-                        Text(engine.displayName).tag(engine.rawValue)
-                    }
-                }
-                .pickerStyle(.radioGroup)
-
-                if settings.sttEngine == .senseVoice {
-                    TextField("SenseVoice 模型目录", text: $settings.senseVoiceModelsPath)
-                    Picker("识别语言", selection: $settings.senseVoiceLanguage) {
-                        Text("中文（推荐）").tag("zh")
-                        Text("自动").tag("auto")
-                        Text("英语").tag("en")
-                        Text("粤语").tag("yue")
-                        Text("日语").tag("ja")
-                        Text("韩语").tag("ko")
-                    }
-                    Toggle("标点与数字归一化（ITN）", isOn: $settings.senseVoiceEnableITN)
-                    Text("开启后由 SenseVoice 输出逗号、句号等标点；关闭则为纯文本。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    Toggle("使用 INT8 模型（更小，推荐）", isOn: $settings.senseVoiceUseInt8)
-                    Toggle("使用 FP32 编码器（无 ANE 时）", isOn: $settings.senseVoiceUseFp32)
-                    LabeledContent("模型状态") {
-                        Text(settings.senseVoiceModelsReady ? "已就绪" : "未下载")
-                            .foregroundStyle(settings.senseVoiceModelsReady ? .green : .orange)
-                    }
-                    Text("首次使用请运行：./scripts/download_sensevoice_models.sh")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    Text("听写全程本地 CoreML，不需要网络。首次启动可能编译 Neural Engine（仅一次）。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                } else {
-                    TextField("whisper.cpp 可执行文件", text: $settings.whisperBinary)
-                    TextField("模型路径（ggml *.bin）", text: $settings.whisperModelPath)
-                    TextField("语言（auto / zh / en）", text: $settings.whisperLanguage)
-                }
-            }
-
-            Section("文本润色") {
-                Toggle("规则后处理（去口癖 / 空白归一化）", isOn: $settings.enableRulesPostprocess)
-                Text("默认开启。流水线：词典 → 规则 → 可选 LLM → App 格式。")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-
-                Toggle("DeepSeek 云端润色（仅发送文本）", isOn: $settings.enableDeepSeekPostprocess)
-                if settings.enableDeepSeekPostprocess {
-                    SecureField("API Key", text: $settings.deepSeekApiKey)
-                    TextField("Base URL", text: $settings.deepSeekBaseURL)
-                    Picker("模型", selection: $settings.deepSeekModel) {
-                        Text("deepseek-v4-flash（推荐，更快）").tag("deepseek-v4-flash")
-                        Text("deepseek-v4-pro").tag("deepseek-v4-pro")
-                    }
-                    HStack {
-                        Text("超时（秒）")
-                        TextField("", value: $settings.deepSeekTimeoutSeconds, format: .number)
-                            .frame(width: 56)
-                    }
-                    Toggle("保守润色（少改动）", isOn: $settings.deepSeekConservative)
-                    LabeledContent("出网类型") {
-                        Text("文本（识别结果）")
-                            .foregroundStyle(.orange)
-                    }
-                    Text("默认关闭。开启后仅把转写文本发往 DeepSeek；失败或超时会回退到规则结果并照常上屏。Key 存于本机 UserDefaults。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    if !settings.deepSeekConfigured {
-                        Text("请填写 API Key 后才会真正请求。")
-                            .font(.footnote)
-                            .foregroundStyle(.red)
-                    }
-                }
-            }
-
-            Section("数据存储") {
-                TextField("SQLite 存储路径", text: $settings.storePath)
-                Text("默认仅本地存储词典与画像，不做任何遥测。")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("词典") {
-                if let dictionaryError {
-                    Text(dictionaryError)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
-                }
-
-                if dictionaryEntries.isEmpty {
-                    Text("暂无词条。添加后，听写结果中的原文会被替换为对应写法。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(dictionaryEntries) { entry in
-                        HStack {
-                            Text(entry.phrase)
-                            Image(systemName: "arrow.right")
-                                .foregroundStyle(.secondary)
-                            Text(entry.replacement)
-                            Spacer()
-                            Button(role: .destructive) {
-                                deleteDictionaryEntry(entry.phrase)
-                            } label: {
-                                Image(systemName: "trash")
-                            }
-                            .buttonStyle(.borderless)
-                        }
-                    }
-                }
-
-                HStack {
-                    TextField("原文", text: $newPhrase)
-                    TextField("替换为", text: $newReplacement)
-                    Button("添加") { addDictionaryEntry() }
-                        .disabled(newPhrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-
-            Section("按应用的写法（App 画像）") {
-                Text("按目标 App 的 Bundle ID 套用语气与格式。开启 DeepSeek 时语气会写入 prompt；格式规则在 LLM 之后仍会生效。")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-
-                if let profileError {
-                    Text(profileError)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
-                }
-
-                if appProfiles.isEmpty {
-                    Text("暂无画像。可添加微信口语、邮件正式、IDE 少改符号等配置。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(appProfiles) { profile in
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text(profile.resolvedDisplayName)
-                                    .fontWeight(.medium)
-                                Spacer()
-                                Text(profile.tonePreset.displayName)
-                                    .foregroundStyle(.secondary)
-                                Button("编辑") { beginEditProfile(profile) }
-                                    .buttonStyle(.borderless)
-                                Button(role: .destructive) {
-                                    deleteAppProfile(profile.appId)
-                                } label: {
-                                    Image(systemName: "trash")
-                                }
-                                .buttonStyle(.borderless)
-                            }
-                            Text(profile.appId)
-                                .font(.caption.monospaced())
-                                .foregroundStyle(.secondary)
-                            Text(profileFormatSummary(profile))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 2)
-                    }
-                }
-
-                if isAddingProfile || editingProfile != nil {
-                    profileEditor
-                } else {
-                    HStack {
-                        Button("添加最近听写的 App") { addLastDictationAppProfile() }
-                        Button("手动添加") { beginAddProfile() }
-                    }
-                    Text("先在目标 App 里按住 Option 听写一次，再点「添加最近听写的 App」。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(minWidth: 520, minHeight: 420)
-        .onAppear { reloadAllStoreData() }
-        .onChange(of: settings.storePath) { _, _ in reloadAllStoreData() }
-    }
-
-    @ViewBuilder
-    private var profileEditor: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(editingProfile == nil ? "新建画像" : "编辑画像")
-                .fontWeight(.semibold)
-            TextField("Bundle ID", text: $draftAppId)
-                .disabled(editingProfile != nil)
-            TextField("显示名称（可选）", text: $draftDisplayName)
-            Picker("语气", selection: $draftTonePreset) {
-                ForEach(AppTonePreset.allCases) { preset in
-                    Text(preset.displayName).tag(preset)
-                }
-            }
-            if draftTonePreset == .custom {
-                TextField("自定义语气（将用于 LLM）", text: $draftCustomTone)
-            } else {
-                Text(draftTonePreset.defaultToneText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Toggle("聊天场景：去掉句末句号", isOn: $draftStripTrailingPeriod)
-            Toggle("开发工具：保留口癖、少做规则清理", isOn: $draftSkipFillerRemoval)
-            HStack {
-                Button("保存") { saveProfileDraft() }
-                    .disabled(draftAppId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                Button("取消") { cancelProfileEditor() }
-            }
-        }
-        .padding(8)
-        .background(.quaternary.opacity(0.4))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-    }
-
-    private func profileFormatSummary(_ profile: AppProfile) -> String {
-        var parts: [String] = []
-        if profile.format.stripTrailingPeriod { parts.append("去句末句号") }
-        if profile.format.skipFillerRemoval { parts.append("少改口癖") }
-        if parts.isEmpty { return "格式：默认" }
-        return "格式：" + parts.joined(separator: " · ")
-    }
-
-    private func reloadAllStoreData() {
-        reloadDictionary()
-        reloadAppProfiles()
-    }
-
-    private func reloadDictionary() {
-        do {
-            let store = try LocalStore(path: settings.storePath)
-            dictionaryEntries = try store.listDictionary()
-            dictionaryError = nil
-        } catch {
-            dictionaryEntries = []
-            dictionaryError = error.localizedDescription
-        }
-    }
-
-    private func addDictionaryEntry() {
-        let phrase = newPhrase.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !phrase.isEmpty else { return }
-        do {
-            let store = try LocalStore(path: settings.storePath)
-            try store.upsert(phrase: phrase, replacement: newReplacement)
-            newPhrase = ""
-            newReplacement = ""
-            dictionaryEntries = try store.listDictionary()
-            dictionaryError = nil
-        } catch {
-            dictionaryError = error.localizedDescription
-        }
-    }
-
-    private func deleteDictionaryEntry(_ phrase: String) {
-        do {
-            let store = try LocalStore(path: settings.storePath)
-            try store.delete(phrase: phrase)
-            dictionaryEntries = try store.listDictionary()
-            dictionaryError = nil
-        } catch {
-            dictionaryError = error.localizedDescription
-        }
-    }
-
-    private func reloadAppProfiles() {
-        do {
-            let store = try LocalStore(path: settings.storePath)
-            appProfiles = try store.listAppProfiles()
-            profileError = nil
-        } catch {
-            appProfiles = []
-            profileError = error.localizedDescription
-        }
-    }
-
-    private func beginAddProfile() {
-        editingProfile = nil
-        isAddingProfile = true
-        draftAppId = ""
-        draftDisplayName = ""
-        draftTonePreset = .neutral
-        draftCustomTone = ""
-        draftStripTrailingPeriod = false
-        draftSkipFillerRemoval = false
-    }
-
-    private func beginEditProfile(_ profile: AppProfile) {
-        editingProfile = profile
-        isAddingProfile = false
-        draftAppId = profile.appId
-        draftDisplayName = profile.format.displayName
-        draftTonePreset = profile.tonePreset
-        draftCustomTone = profile.tonePreset == .custom ? profile.tone : ""
-        draftStripTrailingPeriod = profile.format.stripTrailingPeriod
-        draftSkipFillerRemoval = profile.format.skipFillerRemoval
-    }
-
-    private func cancelProfileEditor() {
-        editingProfile = nil
-        isAddingProfile = false
-    }
-
-    private func addLastDictationAppProfile() {
-        guard let bundleId = statusController.lastDictationBundleId, !bundleId.isEmpty else {
-            profileError = "还没有听写目标。请先切换到目标 App，按住 Option 听写一次后再添加。"
-            return
-        }
-
-        beginAddProfile()
-        draftAppId = bundleId
-        draftDisplayName = statusController.lastDictationAppName ?? ""
-        applySuggestedDefaults(for: bundleId)
-        isAddingProfile = true
-        profileError = nil
-    }
-
-    private func applySuggestedDefaults(for bundleId: String) {
-        let id = bundleId.lowercased()
-        if id.contains("wechat") || id.contains("xinwechat") || id.contains("slack") || id.contains("dingtalk") || id.contains("telegram") {
-            draftTonePreset = .casual
-            draftStripTrailingPeriod = true
-        } else if id.contains("mail") {
-            draftTonePreset = .formal
-        } else if id.contains("xcode") || id.contains("cursor") || id.contains("terminal") || id.contains("code") || id.contains("iterm") {
-            draftTonePreset = .neutral
-            draftSkipFillerRemoval = true
-        }
-    }
-
-    private func saveProfileDraft() {
-        let appId = draftAppId.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !appId.isEmpty else { return }
-
-        let tone: String
-        switch draftTonePreset {
-        case .custom:
-            tone = draftCustomTone.trimmingCharacters(in: .whitespacesAndNewlines)
-            if tone.isEmpty {
-                profileError = "自定义语气不能为空"
-                return
-            }
-        default:
-            tone = draftTonePreset.defaultToneText
-        }
-
-        var format = AppProfileFormatSettings.empty
-        format.displayName = draftDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
-        format.stripTrailingPeriod = draftStripTrailingPeriod
-        format.skipFillerRemoval = draftSkipFillerRemoval
-
-        let profile = AppProfile(
-            appId: appId,
-            tone: tone,
-            format: format,
-            updatedAtMillis: 0
-        )
-
-        do {
-            let store = try LocalStore(path: settings.storePath)
-            try store.upsertAppProfile(profile)
-            appProfiles = try store.listAppProfiles()
-            profileError = nil
-            cancelProfileEditor()
-        } catch {
-            profileError = error.localizedDescription
-        }
-    }
-
-    private func deleteAppProfile(_ appId: String) {
-        do {
-            let store = try LocalStore(path: settings.storePath)
-            try store.deleteAppProfile(appId: appId)
-            appProfiles = try store.listAppProfiles()
-            profileError = nil
-            if editingProfile?.appId == appId {
-                cancelProfileEditor()
-            }
-        } catch {
-            profileError = error.localizedDescription
-        }
-    }
-}
-
 final class StatusController: NSObject, ObservableObject {
     static let shared = StatusController()
 
     private var item: NSStatusItem?
     private var statusMenu: NSMenu?
     private var modelStatusMenuItem: NSMenuItem?
+    private var localLLMStatusMenuItem: NSMenuItem?
     private var loadingSpinner: NSProgressIndicator?
-    private let hotkey = HotkeyMonitor(hotkey: .init(keyCode: 61))
+    private var statusItemWatchdog: Timer?
+    private var menuTarget: NSObject?
+    private let hotkeyMonitor = HotkeyMonitor()
     private let recorder = AudioRecorder()
     private let transcriber = SpeechTranscriber()
     private let settings = AppSettings()
@@ -557,12 +110,14 @@ final class StatusController: NSObject, ObservableObject {
     private let injector = TextInjector()
 
     @Published var hotkeyActive = false
+    @Published var currentHotkeyLabel = DictationHotkey.default.settingsLabel
     private(set) var lastDictationBundleId: String?
     private(set) var lastDictationAppName: String?
 
     var transcriberIsLoaded: Bool { transcriber.isSenseVoiceLoaded }
 
     private enum ModelUIState {
+        case localDownloading
         case ready
         case warming
         case loading
@@ -583,7 +138,13 @@ final class StatusController: NSObject, ObservableObject {
     }
 
     func start(menuTarget: NSObject) {
-        installStatusItem(menuTarget: menuTarget)
+        self.menuTarget = menuTarget
+        // Defer one run-loop turn so launch-time screen-parameter churn
+        // doesn't race the first status-item install.
+        DispatchQueue.main.async {
+            self.installStatusItem(menuTarget: menuTarget)
+            self.startStatusItemWatchdog()
+        }
 
         NotificationCenter.default.addObserver(
             self,
@@ -615,8 +176,14 @@ final class StatusController: NSObject, ObservableObject {
             name: .senseVoiceLoadFailed,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(refreshModelStatusUI),
+            name: .localLLMStatusChanged,
+            object: nil
+        )
 
-        hotkey.onHotkeyDown = { [weak self] in
+        hotkeyMonitor.onHotkeyDown = { [weak self] in
             guard let self else { return }
             NSLog("Recording hotkey down")
             self.injector.rememberTarget()
@@ -637,7 +204,7 @@ final class StatusController: NSObject, ObservableObject {
                 self.hud.show(text: "录音失败：\((error as NSError).localizedDescription)")
             }
         }
-        hotkey.onHotkeyUp = { [weak self] in
+        hotkeyMonitor.onHotkeyUp = { [weak self] in
             guard let self else { return }
             NSLog("Recording hotkey up")
             self.recorder.stopRecording()
@@ -667,18 +234,32 @@ final class StatusController: NSObject, ObservableObject {
                 do {
                     let raw = try await self.transcriber.transcribe(wavURL: wavURL, settings: self.settings)
                     let appId = self.injector.targetBundleId
-                    if self.settings.enableDeepSeekPostprocess, self.settings.deepSeekConfigured {
+                    let provider = self.settings.llmPolishProvider
+                    if provider == .local {
+                        let llm = LocalLLMManager.shared
+                        if llm.isDownloading || !LocalLLMAssets.isReady {
+                            await MainActor.run {
+                                let pct = Int((llm.overallProgress * 100).rounded(.down))
+                                self.hud.show(text: "正在下载本地模型…\(pct)%")
+                            }
+                            try? await llm.ensureReady()
+                        }
+                        if LocalLLMAssets.isReady {
+                            await MainActor.run { self.hud.show(text: "正在润色…") }
+                        }
+                    } else if provider == .deepseek, self.settings.deepSeekConfigured {
                         await MainActor.run {
                             self.hud.show(text: "正在润色…")
                         }
                     }
                     let processed = await TextIntelligence.process(raw, settings: self.settings, appId: appId)
                     NSLog(
-                        "TextIntelligence app=%@ tone=%@ profile=%@ llm=%@",
+                        "TextIntelligence app=%@ tone=%@ profile=%@ llm=%@ provider=%@",
                         processed.appId ?? "nil",
                         processed.tone ?? "none",
                         processed.profileApplied ? "yes" : "no",
-                        processed.llmApplied ? "yes" : "no"
+                        processed.llmApplied ? "yes" : "no",
+                        processed.llmProvider.rawValue
                     )
                     let text = processed.text
                     await MainActor.run {
@@ -691,9 +272,13 @@ final class StatusController: NSObject, ObservableObject {
                 } catch let error as SenseVoiceCoreMLError {
                     switch error {
                     case .noSpeech, .emptyResult:
-                        // Silence / punctuation-only: no paste, no error toast.
                         NSLog("transcribe soft-skip: \(error.localizedDescription)")
-                        await MainActor.run { self.hud.hide() }
+                        await MainActor.run {
+                            self.hud.show(text: "未识别到有效语音")
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                                self.hud.hide()
+                            }
+                        }
                     default:
                         NSLog("transcribe error: \(error.localizedDescription)")
                         await MainActor.run {
@@ -715,15 +300,45 @@ final class StatusController: NSObject, ObservableObject {
             }
         }
 
-        hotkey.start()
-        hotkeyActive = hotkey.isActive
+        applyDictationHotkeyFromSettings()
+        hotkeyMonitor.start()
+        hotkeyActive = hotkeyMonitor.isActive
+        settings.migrateLLMProviderIfNeeded()
+        if settings.llmPolishProvider == .local {
+            LocalLLMManager.shared.prefetchIfNeeded()
+        }
         // Auto-load SenseVoice at launch so the first dictation isn't blocked.
         transcriber.preload(settings: settings)
         refreshStatusAppearance()
     }
 
+    /// Reload push-to-talk key from settings (call after user changes hotkey).
+    func applyDictationHotkeyFromSettings() {
+        let hotkey = settings.dictationHotkey
+        hotkeyMonitor.update(keyCode: hotkey.keyCode)
+        currentHotkeyLabel = hotkey.settingsLabel
+        hotkeyActive = hotkeyMonitor.isActive
+        NSLog("Applied dictation hotkey: \(hotkey.displayName) (\(hotkey.keyCode))")
+    }
+
+    /// Temporarily stop listening while the settings UI captures a new hotkey.
+    func pauseHotkeyForCapture() {
+        hotkeyMonitor.stop()
+        hotkeyActive = false
+    }
+
+    func resumeHotkeyAfterCapture() {
+        applyDictationHotkeyFromSettings()
+        if !hotkeyMonitor.isActive {
+            hotkeyMonitor.start()
+        }
+        hotkeyActive = hotkeyMonitor.isActive
+    }
+
     func stop() {
-        hotkey.stop()
+        statusItemWatchdog?.invalidate()
+        statusItemWatchdog = nil
+        hotkeyMonitor.stop()
         clearLoadingSpinner()
         if let item {
             NSStatusBar.system.removeStatusItem(item)
@@ -731,24 +346,44 @@ final class StatusController: NSObject, ObservableObject {
         item = nil
         statusMenu = nil
         modelStatusMenuItem = nil
+        localLLMStatusMenuItem = nil
+        menuTarget = nil
         NotificationCenter.default.removeObserver(self)
     }
 
     private func installStatusItem(menuTarget: NSObject) {
-        if let item {
-            NSStatusBar.system.removeStatusItem(item)
+        // Keep the existing item if possible — remove+recreate is what made
+        // the icon flash then vanish on multi-display Macs.
+        if item == nil {
+            let created = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+            created.isVisible = true
+            self.item = created
+            NSLog("StatusItem created")
         }
-        clearLoadingSpinner()
 
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        guard let item else { return }
+        item.isVisible = true
+        item.length = NSStatusItem.squareLength
+
+        guard let button = item.button else {
+            NSLog("StatusItem: button is nil — menu bar may be full or unavailable")
+            return
+        }
+        button.imagePosition = .imageOnly
+        button.toolTip = "OpenDictate"
 
         let menu = NSMenu()
         menu.autoenablesItems = false
 
-        let modelStatus = NSMenuItem(title: "模型：…", action: nil, keyEquivalent: "")
+        let modelStatus = NSMenuItem(title: "语音识别：…", action: nil, keyEquivalent: "")
         modelStatus.isEnabled = false
         menu.addItem(modelStatus)
         modelStatusMenuItem = modelStatus
+
+        let localStatus = NSMenuItem(title: "文字润色：…", action: nil, keyEquivalent: "")
+        localStatus.isEnabled = false
+        menu.addItem(localStatus)
+        localLLMStatusMenuItem = localStatus
         menu.addItem(.separator())
 
         let settingsItem = NSMenuItem(
@@ -772,21 +407,78 @@ final class StatusController: NSObject, ObservableObject {
         menu.addItem(quitItem)
 
         item.menu = menu
-        self.item = item
         self.statusMenu = menu
+        setStatusSymbol("mic.fill", on: button)
         refreshStatusAppearance()
+        NSLog(
+            "StatusItem ready visible=%@ length=%.0f hasImage=%@",
+            item.isVisible ? "yes" : "no",
+            item.length,
+            button.image != nil ? "yes" : "no"
+        )
+    }
+
+    private func startStatusItemWatchdog() {
+        statusItemWatchdog?.invalidate()
+        // Re-assert visibility for a short window after launch / display changes.
+        var ticks = 0
+        let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] timer in
+            guard let self else {
+                timer.invalidate()
+                return
+            }
+            ticks += 1
+            self.ensureStatusItemVisible(reason: "watchdog")
+            if ticks >= 30 {
+                timer.invalidate()
+                self.statusItemWatchdog = nil
+            }
+        }
+        statusItemWatchdog = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func ensureStatusItemVisible(reason: String) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { self.ensureStatusItemVisible(reason: reason) }
+            return
+        }
+        if item == nil, let menuTarget {
+            NSLog("StatusItem missing (%@) — reinstalling", reason)
+            installStatusItem(menuTarget: menuTarget)
+            return
+        }
+        guard let item else { return }
+        if !item.isVisible {
+            NSLog("StatusItem was hidden (%@) — restoring", reason)
+            item.isVisible = true
+        }
+        item.length = NSStatusItem.squareLength
+        if item.button?.image == nil {
+            refreshStatusAppearance()
+        }
     }
 
     @objc private func screenParametersChanged() {
-        guard let menuTarget = NSApp.delegate as? NSObject else { return }
-        installStatusItem(menuTarget: menuTarget)
+        NSLog("StatusItem: screen parameters changed — refreshing visibility only")
+        DispatchQueue.main.async {
+            self.ensureStatusItemVisible(reason: "screen-change")
+            self.refreshStatusAppearance()
+            self.startStatusItemWatchdog()
+        }
     }
 
     @objc private func refreshModelStatusUI() {
-        refreshStatusAppearance()
+        DispatchQueue.main.async {
+            self.ensureStatusItemVisible(reason: "model-status")
+            self.refreshStatusAppearance()
+        }
     }
 
     private func modelUIState() -> ModelUIState {
+        if settings.llmPolishProvider == .local, LocalLLMManager.shared.isDownloading {
+            return .localDownloading
+        }
         guard settings.sttEngine == .senseVoice else { return .idle }
         guard settings.senseVoiceModelsReady else { return .missingModels }
         if transcriber.isSenseVoiceWarmedUp { return .ready }
@@ -796,79 +488,105 @@ final class StatusController: NSObject, ObservableObject {
     }
 
     private func refreshStatusAppearance() {
-        guard let button = item?.button else { return }
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { self.refreshStatusAppearance() }
+            return
+        }
+        guard let item else { return }
+        item.isVisible = true
+        item.length = NSStatusItem.squareLength
+        guard let button = item.button else { return }
+
         let state = modelUIState()
-        button.toolTip = statusToolTip(for: state)
+        let llm = LocalLLMManager.shared
+        button.toolTip = combinedToolTip(stt: state, llm: llm)
         modelStatusMenuItem?.title = modelStatusTitle(for: state)
+        localLLMStatusMenuItem?.isHidden = false
+        localLLMStatusMenuItem?.title = textPolishStatusTitle()
 
         switch state {
-        case .loading:
-            showLoadingSpinner(in: button)
-        case .warming:
-            clearLoadingSpinner()
+        case .loading, .localDownloading, .warming:
             setStatusSymbol("mic", on: button)
         case .ready, .idle:
-            clearLoadingSpinner()
             setStatusSymbol("mic.fill", on: button)
         case .missingModels, .failed:
-            clearLoadingSpinner()
             setStatusSymbol("mic.slash", on: button)
         }
     }
 
-    private func setStatusSymbol(_ name: String, on button: NSStatusBarButton) {
-        if let image = NSImage(systemSymbolName: name, accessibilityDescription: "OpenDictate") {
-            image.isTemplate = true
-            button.image = image
+    private func textPolishStatusTitle() -> String {
+        switch settings.llmPolishProvider {
+        case .off:
+            return "文字润色：关闭"
+        case .local:
+            return LocalLLMManager.shared.statusMenuTitle
+        case .deepseek:
+            if settings.deepSeekConfigured {
+                return "文字润色：DeepSeek 已配置"
+            }
+            return "文字润色：DeepSeek 未配置"
         }
-        button.title = ""
     }
 
-    private func showLoadingSpinner(in button: NSStatusBarButton) {
-        if loadingSpinner == nil {
-            let spinner = NSProgressIndicator()
-            spinner.style = .spinning
-            spinner.controlSize = .small
-            spinner.isIndeterminate = true
-            spinner.translatesAutoresizingMaskIntoConstraints = false
-            button.addSubview(spinner)
-            NSLayoutConstraint.activate([
-                spinner.centerXAnchor.constraint(equalTo: button.centerXAnchor),
-                spinner.centerYAnchor.constraint(equalTo: button.centerYAnchor),
-            ])
-            loadingSpinner = spinner
+    private func combinedToolTip(stt: ModelUIState, llm: LocalLLMManager) -> String {
+        var parts: [String] = [statusToolTip(for: stt)]
+        switch settings.llmPolishProvider {
+        case .off:
+            parts.append("文字润色关闭")
+        case .local:
+            if let suffix = llm.statusToolTipSuffix {
+                parts.append(suffix)
+            }
+        case .deepseek:
+            parts.append(settings.deepSeekConfigured ? "DeepSeek 已配置" : "DeepSeek 未配置")
         }
-        button.image = nil
-        button.title = ""
-        // Keep a stable click target while the spinner is showing.
-        item?.length = 28
-        loadingSpinner?.startAnimation(nil)
+        return parts.joined(separator: " · ")
+    }
+
+    private func setStatusSymbol(_ name: String, on button: NSStatusBarButton) {
+        item?.length = NSStatusItem.squareLength
+        item?.isVisible = true
+
+        let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
+        if let image = NSImage(systemSymbolName: name, accessibilityDescription: "OpenDictate")?
+            .withSymbolConfiguration(config) {
+            image.isTemplate = true
+            image.size = NSSize(width: 18, height: 18)
+            button.image = image
+            button.title = ""
+            button.imagePosition = .imageOnly
+        } else {
+            button.image = nil
+            button.title = "OD"
+            button.imagePosition = .imageLeft
+        }
     }
 
     private func clearLoadingSpinner() {
         loadingSpinner?.stopAnimation(nil)
         loadingSpinner?.removeFromSuperview()
         loadingSpinner = nil
-        item?.length = NSStatusItem.variableLength
     }
 
     private func modelStatusTitle(for state: ModelUIState) -> String {
         switch state {
-        case .loading: return "模型：加载中…"
-        case .warming: return "模型：已加载（预热中）"
-        case .ready: return "模型：就绪"
-        case .failed: return "模型：加载失败"
-        case .missingModels: return "模型：未下载"
-        case .idle: return "引擎：whisper.cpp"
+        case .localDownloading: return "语音识别：\(transcriber.isSenseVoiceLoaded ? "就绪" : "加载中…")"
+        case .loading: return "语音识别：加载中…"
+        case .warming: return "语音识别：已加载（预热中）"
+        case .ready: return "语音识别：就绪"
+        case .failed: return "语音识别：加载失败"
+        case .missingModels: return "语音识别：未下载"
+        case .idle: return "语音识别：whisper.cpp"
         }
     }
 
     private func statusToolTip(for state: ModelUIState) -> String {
         switch state {
-        case .loading: return "OpenDictate（模型加载中…）"
-        case .warming: return "OpenDictate（已加载，后台预热中…）"
-        case .ready: return "OpenDictate（就绪）"
-        case .failed: return "OpenDictate（模型加载失败）"
+        case .localDownloading: return "OpenDictate（文字润色模型下载中…）"
+        case .loading: return "OpenDictate（语音识别加载中…）"
+        case .warming: return "OpenDictate（语音识别已加载，后台预热中…）"
+        case .ready: return "OpenDictate（语音识别就绪）"
+        case .failed: return "OpenDictate（语音识别加载失败）"
         case .missingModels: return "OpenDictate（SenseVoice 模型未下载）"
         case .idle: return "OpenDictate"
         }
