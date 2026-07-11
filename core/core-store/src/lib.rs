@@ -47,6 +47,18 @@ CREATE TABLE IF NOT EXISTS app_profiles (
   settings_json TEXT NOT NULL,
   updated_at_millis INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS dictation_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at_millis INTEGER NOT NULL,
+  raw_text TEXT NOT NULL,
+  final_text TEXT NOT NULL,
+  app_id TEXT,
+  source TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_dictation_history_created
+  ON dictation_history(created_at_millis DESC);
 "#,
         )?;
         Ok(())
