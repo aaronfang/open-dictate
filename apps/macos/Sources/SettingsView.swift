@@ -41,7 +41,7 @@ private enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
         case .polish: return "规则清理与可选 LLM"
         case .dictionary: return "听写结果中的固定替换"
         case .appProfiles: return "按目标 App 调整语气与格式"
-        case .storage: return "本地 SQLite 路径"
+        case .storage: return "本地库路径与听写历史"
         }
     }
 }
@@ -65,6 +65,11 @@ struct SettingsView: View {
     @State private var draftStripTrailingPeriod = false
     @State private var draftSkipFillerRemoval = false
     @State private var isAddingProfile = false
+
+    @State private var historyEntries: [DictationHistoryEntry] = []
+    @State private var historyCount = 0
+    @State private var historyError: String?
+    @State private var confirmClearHistory = false
 
     init(statusController: StatusController = StatusController.shared) {
         self.statusController = statusController
@@ -184,10 +189,10 @@ struct SettingsView: View {
 
         SettingsCard(
             title: "热键",
-            footer: "按住热键说话，松开后识别并上屏。不支持 Esc / Command（会干扰取消与粘贴）。更改后立即生效。全局热键与文本注入需要「辅助功能」授权。"
+            footer: "\(settings.dictationTriggerMode.hint)。不支持 Esc / Command（会干扰取消与粘贴）。更改后立即生效。全局热键与文本注入需要「辅助功能」授权。"
         ) {
             SettingsRow(label: "当前热键") {
-                Text(settings.dictationHotkey.settingsLabel)
+                Text(settings.dictationHotkey.settingsLabel(mode: settings.dictationTriggerMode))
                     .foregroundStyle(.primary)
             }
             SettingsRow(label: "热键监听") {
@@ -195,6 +200,12 @@ struct SettingsView: View {
                     text: statusController.hotkeyActive ? "已启动" : "未启动",
                     tone: statusController.hotkeyActive ? .ok : .warn
                 )
+            }
+
+            Picker("触发方式", selection: triggerModeBinding) {
+                ForEach(DictationTriggerMode.allCases) { mode in
+                    Text(mode.displayName).tag(mode.rawValue)
+                }
             }
 
             Picker("常用热键", selection: hotkeyPresetBinding) {
@@ -211,6 +222,7 @@ struct SettingsView: View {
                 if recording {
                     statusController.pauseHotkeyForCapture()
                 } else {
+                    resolveAskHotkeyConflictIfNeeded()
                     statusController.resumeHotkeyAfterCapture()
                 }
             }
@@ -223,6 +235,64 @@ struct SettingsView: View {
                 .buttonStyle(.borderless)
             }
         }
+
+        SettingsCard(
+            title: "Ask AI",
+            footer: "先选中文本，再按 Ask 热键说出指令（如「改得更正式」「缩到一句话」）。需要开启本地或 DeepSeek 润色。触发方式与听写相同。"
+        ) {
+            Toggle("启用 Ask AI", isOn: askEnabledBinding)
+
+            if settings.enableAskAI {
+                SettingsRow(label: "当前热键") {
+                    Text(settings.askAIHotkey.displayName)
+                        .foregroundStyle(.primary)
+                }
+
+                Picker("常用热键", selection: askHotkeyPresetBinding) {
+                    ForEach(DictationHotkey.presets) { preset in
+                        Text(preset.displayName).tag(Int(preset.keyCode))
+                    }
+                    if !DictationHotkey.presets.map(\.keyCode).contains(UInt16(settings.askAIHotkeyKeyCode)) {
+                        Text(settings.askAIHotkey.displayName)
+                            .tag(settings.askAIHotkeyKeyCode)
+                    }
+                }
+
+                HotkeyCaptureButton(keyCode: $settings.askAIHotkeyKeyCode) { recording in
+                    if recording {
+                        statusController.pauseHotkeyForCapture()
+                    } else {
+                        resolveAskHotkeyConflictIfNeeded()
+                        statusController.resumeHotkeyAfterCapture()
+                    }
+                }
+
+                if settings.askAIHotkeyKeyCode == settings.dictationHotkeyKeyCode {
+                    Text("Ask 热键与听写热键相同，请更换其中一个。")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if settings.askAIHotkeyKeyCode != Int(DictationHotkey.defaultAskKeyCode) {
+                    Button("恢复默认（F6）") {
+                        settings.askAIHotkeyKeyCode = Int(DictationHotkey.defaultAskKeyCode)
+                        statusController.applyAskHotkeyFromSettings()
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+        }
+    }
+
+    private var triggerModeBinding: Binding<String> {
+        Binding(
+            get: { settings.dictationTriggerModeRaw },
+            set: { newValue in
+                settings.dictationTriggerModeRaw = newValue
+                statusController.applyDictationHotkeyFromSettings()
+            }
+        )
     }
 
     private var hotkeyPresetBinding: Binding<Int> {
@@ -230,9 +300,40 @@ struct SettingsView: View {
             get: { settings.dictationHotkeyKeyCode },
             set: { newValue in
                 settings.dictationHotkeyKeyCode = newValue
+                resolveAskHotkeyConflictIfNeeded()
                 statusController.applyDictationHotkeyFromSettings()
             }
         )
+    }
+
+    private var askEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { settings.enableAskAI },
+            set: { newValue in
+                settings.enableAskAI = newValue
+                statusController.applyAskHotkeyFromSettings()
+            }
+        )
+    }
+
+    private var askHotkeyPresetBinding: Binding<Int> {
+        Binding(
+            get: { settings.askAIHotkeyKeyCode },
+            set: { newValue in
+                settings.askAIHotkeyKeyCode = newValue
+                resolveAskHotkeyConflictIfNeeded()
+                statusController.applyAskHotkeyFromSettings()
+            }
+        )
+    }
+
+    private func resolveAskHotkeyConflictIfNeeded() {
+        if settings.askAIHotkeyKeyCode == settings.dictationHotkeyKeyCode {
+            let fallback = Int(DictationHotkey.defaultAskKeyCode)
+            settings.askAIHotkeyKeyCode = settings.dictationHotkeyKeyCode == fallback
+                ? Int(DictationHotkey.presets.first(where: { Int($0.keyCode) != settings.dictationHotkeyKeyCode })?.keyCode ?? 96)
+                : fallback
+        }
     }
 
     @ViewBuilder
@@ -248,7 +349,7 @@ struct SettingsView: View {
         }
 
         if settings.sttEngine == .senseVoice {
-            SettingsCard(title: "常用选项", footer: "开启 ITN 后输出逗号、句号等标点；关闭则为纯文本。听写全程本地，不需要网络。") {
+            SettingsCard(title: "常用选项", footer: "开启 ITN 后输出逗号、句号等标点；关闭则为纯文本。听写全程本地，不需要网络。简繁转换在识别与润色之后统一执行。") {
                 SettingsRow(label: "识别语言") {
                     Picker("", selection: $settings.senseVoiceLanguage) {
                         Text("中文（推荐）").tag("zh")
@@ -257,6 +358,15 @@ struct SettingsView: View {
                         Text("粤语").tag("yue")
                         Text("日语").tag("ja")
                         Text("韩语").tag("ko")
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 180)
+                }
+                SettingsRow(label: "汉字字形") {
+                    Picker("", selection: $settings.chineseScriptRaw) {
+                        ForEach(ChineseScriptPreference.allCases) { pref in
+                            Text(pref.displayName).tag(pref.rawValue)
+                        }
                     }
                     .labelsHidden()
                     .frame(maxWidth: 180)
@@ -280,17 +390,29 @@ struct SettingsView: View {
                 SettingsPathField(label: "可执行文件", text: $settings.whisperBinary)
                 SettingsPathField(label: "模型路径（ggml *.bin）", text: $settings.whisperModelPath)
                 SettingsLabeledField(label: "语言", placeholder: "auto / zh / en", text: $settings.whisperLanguage)
+                SettingsRow(label: "汉字字形") {
+                    Picker("", selection: $settings.chineseScriptRaw) {
+                        ForEach(ChineseScriptPreference.allCases) { pref in
+                            Text(pref.displayName).tag(pref.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 180)
+                }
             }
         }
     }
 
     @ViewBuilder
     private var polishPane: some View {
-        SettingsCard(title: "规则后处理", footer: "默认开启。流水线：词典 → 规则 → 可选 LLM → App 格式。") {
-            Toggle("去口癖 / 空白归一化", isOn: $settings.enableRulesPostprocess)
+        SettingsCard(
+            title: "规则后处理",
+            footer: "默认开启。含去口癖、空白归一化与连续重复折叠。开启 LLM 时由模型语义判断改口（不再关键词截断）；关闭 LLM 时仍用关键词兜底。流水线：词典 → 规则 → 可选 LLM → App 格式。"
+        ) {
+            Toggle("去口癖 / 去重复（规则）", isOn: $settings.enableRulesPostprocess)
         }
 
-        SettingsCard(title: "LLM 润色", footer: "关闭时仅用规则与词典。本地模型不出网；DeepSeek 仅发送转写文本。") {
+        SettingsCard(title: "LLM 润色", footer: "关闭时仅用规则与词典。开启后由模型语义整理与改口；失败则回退规则结果。Ask AI 也依赖此项。本地模型不出网；DeepSeek 仅发送文本。") {
             Picker("", selection: llmProviderBinding) {
                 ForEach(LLMPolishProvider.allCases) { provider in
                     Text(provider.displayName).tag(provider.rawValue)
@@ -363,6 +485,13 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var dictionaryPane: some View {
+        SettingsCard(
+            title: "自动学习",
+            footer: "上屏后若你在输入框里改了刚粘贴的内容，会按词拆成多条短替换记入词典（至少 2 字，避免单字误伤）。仅读焦点文本，不出网；可随时关闭。"
+        ) {
+            Toggle("纠错后自动记入词典", isOn: $settings.enableAutoDictionaryLearn)
+        }
+
         SettingsCard(title: "词条", footer: "听写结果中的原文会被替换为对应写法，优先于规则与 LLM。") {
             if let dictionaryError {
                 Text(dictionaryError)
@@ -489,8 +618,106 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var storagePane: some View {
-        SettingsCard(title: "本地数据库", footer: "默认仅本地存储词典与画像，不做任何遥测。修改路径后会重新加载词典与画像。") {
+        SettingsCard(title: "本地数据库", footer: "默认仅本地存储词典、画像与可选历史，不做任何遥测。修改路径后会重新加载。") {
             SettingsPathField(label: "SQLite 存储路径", text: $settings.storePath)
+        }
+
+        SettingsCard(
+            title: "听写历史",
+            footer: "默认关闭。开启后仅将最终上屏文本存于本机 SQLite，可随时清除。不存音频。"
+        ) {
+            Toggle("保存听写历史", isOn: $settings.enableDictationHistory)
+                .onChange(of: settings.enableDictationHistory) { _, enabled in
+                    if enabled { reloadHistory() }
+                }
+
+            if settings.enableDictationHistory {
+                SettingsRow(label: "保留时长") {
+                    Picker("", selection: $settings.historyRetentionDays) {
+                        Text("7 天").tag(7)
+                        Text("14 天").tag(14)
+                        Text("30 天").tag(30)
+                        Text("90 天").tag(90)
+                        Text("直到手动清除").tag(0)
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 180)
+                    .onChange(of: settings.historyRetentionDays) { _, _ in
+                        reloadHistory()
+                    }
+                }
+
+                if let historyError {
+                    Text(historyError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                HStack {
+                    Text(historyCount == 0 ? "暂无记录" : "共 \(historyCount) 条")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("清除全部", role: .destructive) {
+                        confirmClearHistory = true
+                    }
+                    .disabled(historyCount == 0)
+                    .confirmationDialog("清除全部听写历史？", isPresented: $confirmClearHistory) {
+                        Button("清除", role: .destructive) { clearAllHistory() }
+                        Button("取消", role: .cancel) {}
+                    } message: {
+                        Text("此操作不可撤销。词典与画像不受影响。")
+                    }
+                }
+
+                if !historyEntries.isEmpty {
+                    VStack(spacing: 0) {
+                        ForEach(Array(historyEntries.enumerated()), id: \.element.id) { index, entry in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(alignment: .firstTextBaseline) {
+                                    Text(historyTimestamp(entry))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Text(historySourceLabel(entry.source))
+                                        .font(.caption2)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Color.secondary.opacity(0.15))
+                                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                                    Spacer(minLength: 8)
+                                    Button(role: .destructive) {
+                                        deleteHistoryEntry(entry.id)
+                                    } label: {
+                                        Image(systemName: "trash")
+                                    }
+                                    .buttonStyle(.borderless)
+                                }
+                                Text(entry.finalText)
+                                    .lineLimit(3)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .textSelection(.enabled)
+                                if shouldShowHistoryRaw(entry) {
+                                    Text("识别原文：\(entry.rawText)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                        .textSelection(.enabled)
+                                }
+                                if let appId = entry.appId, !appId.isEmpty {
+                                    Text(appId)
+                                        .font(.caption2.monospaced())
+                                        .foregroundStyle(.tertiary)
+                                        .lineLimit(1)
+                                }
+                            }
+                            .padding(.vertical, 8)
+                            if index < historyEntries.count - 1 {
+                                Divider()
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -540,6 +767,87 @@ struct SettingsView: View {
     private func reloadAllStoreData() {
         reloadDictionary()
         reloadAppProfiles()
+        reloadHistory()
+    }
+
+    private func reloadHistory() {
+        do {
+            let store = try LocalStore(path: settings.storePath)
+            if settings.historyRetentionDays > 0 {
+                try store.pruneHistory(retentionDays: settings.historyRetentionDays)
+            }
+            historyEntries = try store.listHistory(limit: 80)
+            historyCount = try store.historyCount()
+            historyError = nil
+        } catch {
+            historyEntries = []
+            historyCount = 0
+            historyError = error.localizedDescription
+        }
+    }
+
+    private func deleteHistoryEntry(_ id: Int64) {
+        do {
+            let store = try LocalStore(path: settings.storePath)
+            try store.deleteHistory(id: id)
+            reloadHistory()
+        } catch {
+            historyError = error.localizedDescription
+        }
+    }
+
+    private func clearAllHistory() {
+        do {
+            let store = try LocalStore(path: settings.storePath)
+            try store.clearHistory()
+            reloadHistory()
+        } catch {
+            historyError = error.localizedDescription
+        }
+    }
+
+    private func historyTimestamp(_ entry: DictationHistoryEntry) -> String {
+        entry.createdAt.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    private func historySourceLabel(_ source: String) -> String {
+        switch source {
+        case "ask": return "Ask"
+        case "dictate": return "听写"
+        default: return source
+        }
+    }
+
+    /// Show STT raw only when polish changed substance (not just 就→， / spacing).
+    private func shouldShowHistoryRaw(_ entry: DictationHistoryEntry) -> Bool {
+        let raw = entry.rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let final = entry.finalText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty, raw != final else { return false }
+
+        let rawCore = String(raw.filter { !$0.isWhitespace && !$0.isPunctuation })
+        let finalCore = String(final.filter { !$0.isWhitespace && !$0.isPunctuation })
+        if rawCore == finalCore { return false }
+
+        // Ignore tiny particle tweaks (e.g. drop one「就/了」).
+        return contentDiffUnits(rawCore, finalCore) >= 2
+    }
+
+    private func contentDiffUnits(_ a: String, _ b: String) -> Int {
+        let ac = Array(a)
+        let bc = Array(b)
+        if ac.isEmpty { return bc.count }
+        if bc.isEmpty { return ac.count }
+        var prev = Array(0...bc.count)
+        var cur = Array(repeating: 0, count: bc.count + 1)
+        for i in 1...ac.count {
+            cur[0] = i
+            for j in 1...bc.count {
+                let cost = ac[i - 1] == bc[j - 1] ? 0 : 1
+                cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+            }
+            swap(&prev, &cur)
+        }
+        return prev[bc.count]
     }
 
     private func reloadDictionary() {

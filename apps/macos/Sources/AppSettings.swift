@@ -42,6 +42,27 @@ final class AppSettings: ObservableObject {
 
     /// Push-to-talk hardware key code. Default: right Option (61).
     @AppStorage("dictationHotkeyKeyCode") var dictationHotkeyKeyCode: Int = Int(DictationHotkey.defaultKeyCode)
+    /// hold = press-and-hold; toggle = press to start, press again to stop.
+    @AppStorage("dictationTriggerMode") var dictationTriggerModeRaw: String = DictationTriggerMode.hold.rawValue
+
+    /// Ask AI hotkey. Default: F6.
+    @AppStorage("askAIHotkeyKeyCode") var askAIHotkeyKeyCode: Int = Int(DictationHotkey.defaultAskKeyCode)
+    @AppStorage("enableAskAI") var enableAskAI: Bool = true
+
+    /// Local-only dictation history. Default off (privacy).
+    @AppStorage("enableDictationHistory") var enableDictationHistory: Bool = false
+    /// Keep history for this many days; 0 = until manually cleared.
+    @AppStorage("historyRetentionDays") var historyRetentionDays: Int = 30
+    /// After paste, detect manual edits and upsert into personal dictionary. Default on.
+    @AppStorage("enableAutoDictionaryLearn") var enableAutoDictionaryLearn: Bool = true
+
+    /// Unify Chinese output script. Default: simplified (SenseVoice/LLM may mix 简/繁).
+    @AppStorage("chineseScript") var chineseScriptRaw: String = ChineseScriptPreference.simplified.rawValue
+
+    var chineseScript: ChineseScriptPreference {
+        get { ChineseScriptPreference(rawValue: chineseScriptRaw) ?? .simplified }
+        set { chineseScriptRaw = newValue.rawValue }
+    }
 
     var dictationHotkey: DictationHotkey {
         get {
@@ -51,6 +72,21 @@ final class AppSettings: ObservableObject {
         set {
             dictationHotkeyKeyCode = Int(newValue.keyCode)
         }
+    }
+
+    var askAIHotkey: DictationHotkey {
+        get {
+            let code = UInt16(clamping: askAIHotkeyKeyCode)
+            return DictationHotkey(keyCode: DictationHotkey.isAllowed(code) ? code : DictationHotkey.defaultAskKeyCode)
+        }
+        set {
+            askAIHotkeyKeyCode = Int(newValue.keyCode)
+        }
+    }
+
+    var dictationTriggerMode: DictationTriggerMode {
+        get { DictationTriggerMode(rawValue: dictationTriggerModeRaw) ?? .hold }
+        set { dictationTriggerModeRaw = newValue.rawValue }
     }
 
     var llmPolishProvider: LLMPolishProvider {

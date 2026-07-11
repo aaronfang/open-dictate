@@ -103,11 +103,25 @@ final class StatusController: NSObject, ObservableObject {
     private var statusItemWatchdog: Timer?
     private var menuTarget: NSObject?
     private let hotkeyMonitor = HotkeyMonitor()
+    private let askHotkeyMonitor = HotkeyMonitor(keyCode: DictationHotkey.defaultAskKeyCode)
     private let recorder = AudioRecorder()
     private let transcriber = SpeechTranscriber()
     private let settings = AppSettings()
     private let hud = HudWindow()
     private let injector = TextInjector()
+
+    private enum SessionKind {
+        case dictate
+        case ask
+    }
+
+    private var activeSession: SessionKind?
+    private var isBusy = false
+    private var askSelectedText: String?
+    /// Last successfully delivered dictation/Ask text (for spoken revision commands).
+    private var lastDeliveredText: String?
+    private var pendingCorrectionOriginal: String?
+    private var correctionProbeToken: UInt64 = 0
 
     @Published var hotkeyActive = false
     @Published var currentHotkeyLabel = DictationHotkey.default.settingsLabel
@@ -184,124 +198,24 @@ final class StatusController: NSObject, ObservableObject {
         )
 
         hotkeyMonitor.onHotkeyDown = { [weak self] in
-            guard let self else { return }
-            NSLog("Recording hotkey down")
-            self.injector.rememberTarget()
-            self.lastDictationBundleId = self.injector.targetBundleId
-            self.lastDictationAppName = self.injector.targetAppName
-            // Kick model load as early as possible (parallel with recording).
-            if self.settings.sttEngine == .senseVoice, !self.transcriber.isSenseVoiceLoaded {
-                self.transcriber.preload(settings: self.settings)
-                self.refreshStatusAppearance()
-                self.hud.show(text: "正在录音（模型加载中）…")
-            } else {
-                self.hud.show(text: "正在录音…")
-            }
-            do {
-                _ = try self.recorder.startRecording()
-            } catch {
-                NSLog("startRecording error: \(error)")
-                self.hud.show(text: "录音失败：\((error as NSError).localizedDescription)")
-            }
+            self?.handleDictationKeyDown()
         }
         hotkeyMonitor.onHotkeyUp = { [weak self] in
-            guard let self else { return }
-            NSLog("Recording hotkey up")
-            self.recorder.stopRecording()
-            self.hud.hide()
-
-            guard let wavURL = self.recorder.lastRecordingURL else {
-                self.hud.show(text: "未找到录音文件")
-                return
-            }
-
-            Task {
-                let statusText: String
-                if self.settings.sttEngine == .senseVoice {
-                    if !self.transcriber.isSenseVoiceLoaded {
-                        statusText = "模型加载中…"
-                    } else if !self.transcriber.isSenseVoiceWarmedUp {
-                        statusText = "正在识别（首次可能较慢）…"
-                    } else {
-                        statusText = "正在识别…"
-                    }
-                } else {
-                    statusText = "正在识别…"
-                }
-                await MainActor.run {
-                    self.hud.show(text: statusText)
-                }
-                do {
-                    let raw = try await self.transcriber.transcribe(wavURL: wavURL, settings: self.settings)
-                    let appId = self.injector.targetBundleId
-                    let provider = self.settings.llmPolishProvider
-                    if provider == .local {
-                        let llm = LocalLLMManager.shared
-                        if llm.isDownloading || !LocalLLMAssets.isReady {
-                            await MainActor.run {
-                                let pct = Int((llm.overallProgress * 100).rounded(.down))
-                                self.hud.show(text: "正在下载本地模型…\(pct)%")
-                            }
-                            try? await llm.ensureReady()
-                        }
-                        if LocalLLMAssets.isReady {
-                            await MainActor.run { self.hud.show(text: "正在润色…") }
-                        }
-                    } else if provider == .deepseek, self.settings.deepSeekConfigured {
-                        await MainActor.run {
-                            self.hud.show(text: "正在润色…")
-                        }
-                    }
-                    let processed = await TextIntelligence.process(raw, settings: self.settings, appId: appId)
-                    NSLog(
-                        "TextIntelligence app=%@ tone=%@ profile=%@ llm=%@ provider=%@",
-                        processed.appId ?? "nil",
-                        processed.tone ?? "none",
-                        processed.profileApplied ? "yes" : "no",
-                        processed.llmApplied ? "yes" : "no",
-                        processed.llmProvider.rawValue
-                    )
-                    let text = processed.text
-                    await MainActor.run {
-                        self.hud.hide()
-                        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            return
-                        }
-                        self.injector.insert(text: text)
-                    }
-                } catch let error as SenseVoiceCoreMLError {
-                    switch error {
-                    case .noSpeech, .emptyResult:
-                        NSLog("transcribe soft-skip: \(error.localizedDescription)")
-                        await MainActor.run {
-                            self.hud.show(text: "未识别到有效语音")
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
-                                self.hud.hide()
-                            }
-                        }
-                    default:
-                        NSLog("transcribe error: \(error.localizedDescription)")
-                        await MainActor.run {
-                            self.hud.show(text: "识别失败：\(error.localizedDescription)")
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                                self.hud.hide()
-                            }
-                        }
-                    }
-                } catch {
-                    NSLog("transcribe error: \(error.localizedDescription)")
-                    await MainActor.run {
-                        self.hud.show(text: "识别失败：\(error.localizedDescription)")
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                            self.hud.hide()
-                        }
-                    }
-                }
-            }
+            self?.handleDictationKeyUp()
+        }
+        askHotkeyMonitor.onHotkeyDown = { [weak self] in
+            self?.handleAskKeyDown()
+        }
+        askHotkeyMonitor.onHotkeyUp = { [weak self] in
+            self?.handleAskKeyUp()
         }
 
         applyDictationHotkeyFromSettings()
+        applyAskHotkeyFromSettings()
         hotkeyMonitor.start()
+        if settings.enableAskAI {
+            askHotkeyMonitor.start()
+        }
         hotkeyActive = hotkeyMonitor.isActive
         settings.migrateLLMProviderIfNeeded()
         if settings.llmPolishProvider == .local {
@@ -312,25 +226,470 @@ final class StatusController: NSObject, ObservableObject {
         refreshStatusAppearance()
     }
 
+    private func handleDictationKeyDown() {
+        switch settings.dictationTriggerMode {
+        case .hold:
+            beginSession(.dictate)
+        case .toggle:
+            if activeSession == .dictate {
+                endSession()
+            } else {
+                beginSession(.dictate)
+            }
+        }
+    }
+
+    private func handleDictationKeyUp() {
+        guard settings.dictationTriggerMode == .hold else { return }
+        guard activeSession == .dictate else { return }
+        endSession()
+    }
+
+    private func handleAskKeyDown() {
+        guard settings.enableAskAI else { return }
+        switch settings.dictationTriggerMode {
+        case .hold:
+            beginSession(.ask)
+        case .toggle:
+            if activeSession == .ask {
+                endSession()
+            } else {
+                beginSession(.ask)
+            }
+        }
+    }
+
+    private func handleAskKeyUp() {
+        guard settings.enableAskAI else { return }
+        guard settings.dictationTriggerMode == .hold else { return }
+        guard activeSession == .ask else { return }
+        endSession()
+    }
+
+    private func beginSession(_ kind: SessionKind) {
+        guard !isBusy else {
+            hud.show(text: "正在处理上一次结果…")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                self?.hud.hide()
+            }
+            return
+        }
+        guard activeSession == nil else { return }
+
+        // Never let a previous delayed Cmd+V fire into this new session.
+        injector.cancelPendingPaste()
+        // Learn corrections from the previous paste before starting a new recording.
+        probeAndLearnCorrectionIfNeeded()
+
+        if kind == .ask {
+            settings.migrateLLMProviderIfNeeded()
+            if settings.llmPolishProvider == .off {
+                hud.show(text: "Ask AI 需要开启本地或 DeepSeek 润色")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                    self?.hud.hide()
+                }
+                return
+            }
+            if settings.llmPolishProvider == .deepseek, !settings.deepSeekConfigured {
+                hud.show(text: "请先配置 DeepSeek API Key")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                    self?.hud.hide()
+                }
+                return
+            }
+            guard let selected = injector.captureSelectedText(),
+                  !selected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                hud.show(text: "请先选中要处理的文本")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
+                    self?.hud.hide()
+                }
+                return
+            }
+            askSelectedText = selected
+        } else {
+            askSelectedText = nil
+            injector.rememberTarget()
+            lastDictationBundleId = injector.targetBundleId
+            lastDictationAppName = injector.targetAppName
+        }
+
+        activeSession = kind
+        NSLog("Session begin: \(kind)")
+
+        if settings.sttEngine == .senseVoice, !transcriber.isSenseVoiceLoaded {
+            transcriber.preload(settings: settings)
+            refreshStatusAppearance()
+        }
+
+        let recordingHint: String
+        switch (kind, settings.dictationTriggerMode, settings.sttEngine == .senseVoice && !transcriber.isSenseVoiceLoaded) {
+        case (.dictate, .toggle, true):
+            recordingHint = "录音中（再按结束，模型加载中）…"
+        case (.dictate, .toggle, false):
+            recordingHint = "录音中（再按热键结束）…"
+        case (.dictate, .hold, true):
+            recordingHint = "正在录音（模型加载中）…"
+        case (.dictate, .hold, false):
+            recordingHint = "正在录音…"
+        case (.ask, .toggle, _):
+            recordingHint = "Ask：说出指令（再按结束）…"
+        case (.ask, .hold, _):
+            recordingHint = "Ask：按住说出指令…"
+        }
+        hud.show(text: recordingHint)
+
+        do {
+            _ = try recorder.startRecording()
+        } catch {
+            NSLog("startRecording error: \(error)")
+            activeSession = nil
+            askSelectedText = nil
+            hud.show(text: "录音失败：\((error as NSError).localizedDescription)")
+        }
+    }
+
+    private func endSession() {
+        guard let kind = activeSession else { return }
+        activeSession = nil
+        NSLog("Session end: \(kind)")
+        recorder.stopRecording()
+        hud.hide()
+
+        guard let wavURL = recorder.lastRecordingURL else {
+            askSelectedText = nil
+            hud.show(text: "未找到录音文件")
+            return
+        }
+
+        let selectedForAsk = askSelectedText
+        askSelectedText = nil
+        isBusy = true
+
+        Task {
+            defer {
+                DispatchQueue.main.async { [weak self] in
+                    self?.isBusy = false
+                }
+            }
+            await MainActor.run {
+                self.hud.show(text: self.recognitionStatusText())
+            }
+            do {
+                // Silence / mic bump: do not STT, do not paste old clipboard.
+                if self.isSilentRecording(wavURL) {
+                    NSLog("Session soft-skip: silence / too short")
+                    await MainActor.run {
+                        self.injector.cancelPendingPaste()
+                        self.hud.show(text: "未检测到语音")
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            self.hud.hide()
+                        }
+                    }
+                    return
+                }
+
+                let raw = try await self.transcriber.transcribe(wavURL: wavURL, settings: self.settings)
+                switch kind {
+                case .dictate:
+                    await self.finishDictate(raw: raw)
+                case .ask:
+                    await self.finishAsk(selected: selectedForAsk ?? "", instructionRaw: raw)
+                }
+            } catch let error as SenseVoiceCoreMLError {
+                await self.handleTranscribeError(error)
+            } catch {
+                NSLog("transcribe error: \(error.localizedDescription)")
+                await MainActor.run {
+                    self.injector.cancelPendingPaste()
+                    self.hud.show(text: "识别失败：\(error.localizedDescription)")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                        self.hud.hide()
+                    }
+                }
+            }
+        }
+    }
+
+    private func isSilentRecording(_ wavURL: URL) -> Bool {
+        do {
+            let samples = try WavConverter.loadFloat32Mono16k(url: wavURL)
+            let silent = WavConverter.looksLikeSilence(samples)
+            if silent {
+                NSLog(
+                    "Audio silence gate: frames=%d peak=%.4f duration=%.2fs",
+                    samples.count,
+                    WavConverter.peakAmplitude(samples),
+                    Double(samples.count) / Double(SenseVoiceConfig.sampleRate)
+                )
+            }
+            return silent
+        } catch {
+            NSLog("Audio silence gate skipped: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    private func recognitionStatusText() -> String {
+        if settings.sttEngine == .senseVoice {
+            if !transcriber.isSenseVoiceLoaded {
+                return "模型加载中…"
+            }
+            if !transcriber.isSenseVoiceWarmedUp {
+                return "正在识别（首次可能较慢）…"
+            }
+        }
+        return "正在识别…"
+    }
+
+    private func finishDictate(raw: String) async {
+        let appId = injector.targetBundleId
+        let provider = settings.llmPolishProvider
+        if provider == .local {
+            let llm = LocalLLMManager.shared
+            if llm.isDownloading || !LocalLLMAssets.isReady {
+                await MainActor.run {
+                    let pct = Int((llm.overallProgress * 100).rounded(.down))
+                    self.hud.show(text: "正在下载本地模型…\(pct)%")
+                }
+                try? await llm.ensureReady()
+            }
+            if LocalLLMAssets.isReady {
+                await MainActor.run { self.hud.show(text: "正在润色…") }
+            }
+        } else if provider == .deepseek, settings.deepSeekConfigured {
+            await MainActor.run { self.hud.show(text: "正在润色…") }
+        }
+        let previous = lastDeliveredText
+        let processed = await TextIntelligence.process(
+            raw,
+            settings: settings,
+            appId: appId,
+            previousText: previous
+        )
+        NSLog(
+            "TextIntelligence app=%@ tone=%@ profile=%@ llm=%@ provider=%@",
+            processed.appId ?? "nil",
+            processed.tone ?? "none",
+            processed.profileApplied ? "yes" : "no",
+            processed.llmApplied ? "yes" : "no",
+            processed.llmProvider.rawValue
+        )
+        let text = processed.text
+        let rawForHistory = raw
+        await MainActor.run {
+            self.hud.hide()
+            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                self.injector.cancelPendingPaste()
+                return
+            }
+            let outcome = self.injector.insert(text: text)
+            self.lastDeliveredText = text
+            self.recordHistory(raw: rawForHistory, final: text, appId: appId, source: "dictate")
+            self.scheduleCorrectionProbe(delivered: text)
+            switch outcome {
+            case .clipboardOnly:
+                self.hud.show(text: "已复制到剪贴板，按 Cmd+V 粘贴")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                    self.hud.hide()
+                }
+            case .pasted:
+                break
+            }
+        }
+    }
+
+    private func finishAsk(selected: String, instructionRaw: String) async {
+        let instruction = instructionRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !instruction.isEmpty else {
+            await MainActor.run {
+                self.hud.show(text: "未识别到指令")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                    self.hud.hide()
+                }
+            }
+            return
+        }
+
+        if settings.llmPolishProvider == .local {
+            let llm = LocalLLMManager.shared
+            if llm.isDownloading || !LocalLLMAssets.isReady {
+                await MainActor.run {
+                    let pct = Int((llm.overallProgress * 100).rounded(.down))
+                    self.hud.show(text: "正在下载本地模型…\(pct)%")
+                }
+                try? await llm.ensureReady()
+            }
+        }
+        await MainActor.run { self.hud.show(text: "Ask AI 处理中…") }
+
+        do {
+            let result = try await TextIntelligence.ask(
+                selected: selected,
+                instruction: instruction,
+                settings: settings
+            )
+            await MainActor.run {
+                self.hud.hide()
+                if result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    self.injector.cancelPendingPaste()
+                    return
+                }
+                let outcome = self.injector.insert(text: result, refreshFocus: false)
+                self.lastDeliveredText = result
+                self.recordHistory(raw: instruction, final: result, appId: self.injector.targetBundleId, source: "ask")
+                self.scheduleCorrectionProbe(delivered: result)
+                switch outcome {
+                case .clipboardOnly:
+                    self.hud.show(text: "已复制到剪贴板，按 Cmd+V 粘贴")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                        self.hud.hide()
+                    }
+                case .pasted:
+                    break
+                }
+            }
+        } catch {
+            NSLog("Ask AI error: \(error.localizedDescription)")
+            await MainActor.run {
+                self.hud.show(text: "Ask 失败：\(error.localizedDescription)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                    self.hud.hide()
+                }
+            }
+        }
+    }
+
+    private func handleTranscribeError(_ error: SenseVoiceCoreMLError) async {
+        await MainActor.run {
+            self.injector.cancelPendingPaste()
+        }
+        switch error {
+        case .noSpeech, .emptyResult:
+            NSLog("transcribe soft-skip: \(error.localizedDescription)")
+            await MainActor.run {
+                self.hud.show(text: "未识别到有效语音")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                    self.hud.hide()
+                }
+            }
+        case .weakResult:
+            // Should have been resolved in SpeechTranscriber; treat as soft skip if it escapes.
+            NSLog("transcribe weakResult escaped: \(error.localizedDescription)")
+            await MainActor.run {
+                self.hud.show(text: "未识别到有效语音")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                    self.hud.hide()
+                }
+            }
+        default:
+            NSLog("transcribe error: \(error.localizedDescription)")
+            await MainActor.run {
+                self.hud.show(text: "识别失败：\(error.localizedDescription)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                    self.hud.hide()
+                }
+            }
+        }
+    }
+
+    // MARK: - History & dictionary learning
+
+    private func recordHistory(raw: String, final: String, appId: String?, source: String) {
+        guard settings.enableDictationHistory else { return }
+        do {
+            let store = try LocalStore(path: settings.storePath)
+            try store.insertHistory(rawText: raw, finalText: final, appId: appId, source: source)
+            try store.pruneHistory(retentionDays: settings.historyRetentionDays)
+            NSLog("History: saved source=%@ chars=%d", source, final.count)
+        } catch {
+            NSLog("History: save failed: %@", error.localizedDescription)
+        }
+    }
+
+    private func scheduleCorrectionProbe(delivered: String) {
+        guard settings.enableAutoDictionaryLearn else { return }
+        pendingCorrectionOriginal = delivered
+        correctionProbeToken &+= 1
+        let token = correctionProbeToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
+            guard let self, token == self.correctionProbeToken else { return }
+            self.probeAndLearnCorrectionIfNeeded()
+        }
+    }
+
+    private func probeAndLearnCorrectionIfNeeded() {
+        guard settings.enableAutoDictionaryLearn else { return }
+        guard let original = pendingCorrectionOriginal,
+              !original.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        guard let field = injector.focusedStringValue(refreshFocus: true),
+              let corrected = CorrectionLearner.findCorrectedVariant(original: original, in: field) else {
+            return
+        }
+
+        let pairs = CorrectionLearner.extractPairs(from: original, to: corrected)
+        guard !pairs.isEmpty else { return }
+
+        do {
+            let store = try LocalStore(path: settings.storePath)
+            var learned: [String] = []
+            for pair in pairs {
+                try store.upsert(phrase: pair.phrase, replacement: pair.replacement)
+                learned.append("\(pair.phrase)→\(pair.replacement)")
+                NSLog("Dictionary learn: %@ → %@", pair.phrase, pair.replacement)
+            }
+            pendingCorrectionOriginal = nil
+            correctionProbeToken &+= 1
+            if let first = learned.first {
+                let more = learned.count > 1 ? " 等\(learned.count)条" : ""
+                hud.show(text: "已记入词典：\(first)\(more)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { [weak self] in
+                    self?.hud.hide()
+                }
+            }
+        } catch {
+            NSLog("Dictionary learn failed: %@", error.localizedDescription)
+        }
+    }
+
     /// Reload push-to-talk key from settings (call after user changes hotkey).
     func applyDictationHotkeyFromSettings() {
         let hotkey = settings.dictationHotkey
         hotkeyMonitor.update(keyCode: hotkey.keyCode)
-        currentHotkeyLabel = hotkey.settingsLabel
+        currentHotkeyLabel = hotkey.settingsLabel(mode: settings.dictationTriggerMode)
         hotkeyActive = hotkeyMonitor.isActive
-        NSLog("Applied dictation hotkey: \(hotkey.displayName) (\(hotkey.keyCode))")
+        NSLog("Applied dictation hotkey: \(hotkey.displayName) (\(hotkey.keyCode)) mode=\(settings.dictationTriggerMode.rawValue)")
+    }
+
+    func applyAskHotkeyFromSettings() {
+        let hotkey = settings.askAIHotkey
+        let wasActive = askHotkeyMonitor.isActive
+        askHotkeyMonitor.update(keyCode: hotkey.keyCode)
+        if settings.enableAskAI {
+            if !askHotkeyMonitor.isActive {
+                askHotkeyMonitor.start()
+            }
+        } else if wasActive || askHotkeyMonitor.isActive {
+            askHotkeyMonitor.stop()
+        }
+        NSLog("Applied Ask hotkey: \(hotkey.displayName) (\(hotkey.keyCode)) enabled=\(settings.enableAskAI)")
     }
 
     /// Temporarily stop listening while the settings UI captures a new hotkey.
     func pauseHotkeyForCapture() {
         hotkeyMonitor.stop()
+        askHotkeyMonitor.stop()
         hotkeyActive = false
     }
 
     func resumeHotkeyAfterCapture() {
         applyDictationHotkeyFromSettings()
+        applyAskHotkeyFromSettings()
         if !hotkeyMonitor.isActive {
             hotkeyMonitor.start()
+        }
+        if settings.enableAskAI, !askHotkeyMonitor.isActive {
+            askHotkeyMonitor.start()
         }
         hotkeyActive = hotkeyMonitor.isActive
     }
@@ -339,6 +698,7 @@ final class StatusController: NSObject, ObservableObject {
         statusItemWatchdog?.invalidate()
         statusItemWatchdog = nil
         hotkeyMonitor.stop()
+        askHotkeyMonitor.stop()
         clearLoadingSpinner()
         if let item {
             NSStatusBar.system.removeStatusItem(item)
