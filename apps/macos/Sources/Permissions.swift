@@ -16,6 +16,15 @@ enum Permissions {
         Bundle.main.executableURL?.path ?? ProcessInfo.processInfo.arguments[0]
     }
 
+    /// Path shown in Accessibility instructions (.app when bundled).
+    static var accessibilityTargetPath: String {
+        let bundleURL = Bundle.main.bundleURL
+        if bundleURL.pathExtension == "app" {
+            return bundleURL.path
+        }
+        return executablePath
+    }
+
     static var isMicrophoneGranted: Bool {
         if #available(macOS 14.0, *) {
             return AVAudioApplication.shared.recordPermission == .granted
@@ -76,8 +85,8 @@ enum Permissions {
         }
         if !isAccessibilityGranted {
             lines.append("• 辅助功能：用于全局热键与文本上屏")
-            lines.append("  请在列表中添加以下程序：")
-            lines.append("  \(executablePath)")
+            lines.append("  请在列表中添加：")
+            lines.append("  \(accessibilityTargetPath)")
         }
         alert.informativeText = lines.joined(separator: "\n")
         alert.addButton(withTitle: "打开系统设置")

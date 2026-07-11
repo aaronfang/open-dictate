@@ -5,6 +5,26 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${ROOT_DIR}/models/sensevoice"
 REPO="FluidInference/sensevoice-small-coreml"
 
+usage() {
+  cat <<'EOF'
+Usage: ./scripts/download_sensevoice_models.sh [--app-support]
+
+  (default)        Download into repo models/sensevoice
+  --app-support    Download into ~/Library/Application Support/OpenDictate/models/sensevoice
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --app-support)
+      OUT_DIR="${HOME}/Library/Application Support/OpenDictate/models/sensevoice"
+      shift
+      ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
+  esac
+done
+
 mkdir -p "${OUT_DIR}"
 
 if ! command -v hf >/dev/null 2>&1; then

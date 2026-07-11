@@ -54,6 +54,47 @@ enum SenseVoiceConfig {
     }
 
     static var defaultModelsDirectory: String {
-        "/Users/aaronfang/Documents/github/open-dictate/models/sensevoice"
+        // 1) Bundled with OpenDictate.app
+        if let resourceRoot = Bundle.main.resourceURL {
+            let bundled = resourceRoot
+                .appendingPathComponent("Models", isDirectory: true)
+                .appendingPathComponent("SenseVoice", isDirectory: true)
+            if FileManager.default.fileExists(
+                atPath: bundled.appendingPathComponent("vocab.json").path
+            ) {
+                return bundled.path
+            }
+        }
+
+        // 2) Application Support (download script --app-support)
+        let appSupport = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("OpenDictate", isDirectory: true)
+            .appendingPathComponent("models", isDirectory: true)
+            .appendingPathComponent("sensevoice", isDirectory: true)
+        if FileManager.default.fileExists(
+            atPath: appSupport.appendingPathComponent("vocab.json").path
+        ) {
+            return appSupport.path
+        }
+
+        // 3) Dev checkout: walk up from the executable looking for models/sensevoice
+        let exe = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
+        var dir = exe.deletingLastPathComponent()
+        for _ in 0..<8 {
+            let candidate = dir
+                .appendingPathComponent("models", isDirectory: true)
+                .appendingPathComponent("sensevoice", isDirectory: true)
+            if FileManager.default.fileExists(
+                atPath: candidate.appendingPathComponent("vocab.json").path
+            ) {
+                return candidate.path
+            }
+            let parent = dir.deletingLastPathComponent()
+            if parent.path == dir.path { break }
+            dir = parent
+        }
+
+        return appSupport.path
     }
 }

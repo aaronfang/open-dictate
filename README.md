@@ -24,14 +24,29 @@ cd core
 cargo check
 ```
 
-### 2) 运行 macOS 外壳（SPM）
+### 2) 打包并运行 `.app`（推荐）
+
+```bash
+./scripts/package_macos_app.sh
+open dist/OpenDictate.app
+```
+
+SenseVoice 模型（二选一）：
+
+```bash
+./scripts/download_sensevoice_models.sh --app-support
+# 或打包时打进 App：
+./scripts/package_macos_app.sh --with-models
+```
+
+也可用 SPM 直接跑开发二进制：
 
 ```bash
 cd apps/macos
 swift build
 ```
 
-你也可以用 Xcode 直接打开 `apps/macos/Package.swift` 运行（会更方便申请权限与调试）。
+或用 Xcode 打开 `apps/macos/Package.swift` 运行（方便申请权限与调试）。
 
 ### 3) 权限
 
@@ -40,6 +55,7 @@ swift build
 - **麦克风权限**：录音
 - **辅助功能（Accessibility）权限**：`CGEventTap` 全局热键监测 + 文本注入（`AXUIElement` / 模拟粘贴）
 
+使用 `.app` 时，请在辅助功能列表中添加 **OpenDictate.app**。
 ## 文档
 
 - [产品路线图](docs/roadmap.md)
