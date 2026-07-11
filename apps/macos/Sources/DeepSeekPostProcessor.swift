@@ -33,12 +33,44 @@ enum DeepSeekPostProcessor {
     static func process(
         _ input: String,
         tone: String?,
+        config: Config,
+        previousText: String? = nil,
+        script: ChineseScriptPreference = .simplified
+    ) async throws -> String {
+        try await chat(
+            system: LLMPolishPrompt.system,
+            user: LLMPolishPrompt.user(
+                text: input,
+                tone: tone,
+                conservative: config.conservative,
+                previousText: previousText,
+                script: script
+            ),
+            config: config
+        )
+    }
+
+    static func ask(
+        selected: String,
+        instruction: String,
+        config: Config
+    ) async throws -> String {
+        try await chat(
+            system: LLMPolishPrompt.askSystem,
+            user: LLMPolishPrompt.askUser(selected: selected, instruction: instruction),
+            config: config
+        )
+    }
+
+    private static func chat(
+        system: String,
+        user: String,
         config: Config
     ) async throws -> String {
         let trimmedKey = config.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedKey.isEmpty else { throw ProcessError.notConfigured }
 
-        let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = user.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw ProcessError.emptyInput }
 
         let url = chatCompletionsURL(baseURL: config.baseURL)
@@ -55,15 +87,8 @@ enum DeepSeekPostProcessor {
             "temperature": 0.2,
             "stream": false,
             "messages": [
-                ["role": "system", "content": LLMPolishPrompt.system],
-                [
-                    "role": "user",
-                    "content": LLMPolishPrompt.user(
-                        text: text,
-                        tone: tone,
-                        conservative: config.conservative
-                    ),
-                ],
+                ["role": "system", "content": system],
+                ["role": "user", "content": user],
             ],
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)

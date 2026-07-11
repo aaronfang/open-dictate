@@ -184,7 +184,9 @@ final class LocalLLMManager: ObservableObject {
         _ input: String,
         tone: String?,
         conservative: Bool,
-        timeoutSeconds: TimeInterval
+        timeoutSeconds: TimeInterval,
+        previousText: String? = nil,
+        script: ChineseScriptPreference = .simplified
     ) async throws -> String {
         try await ensureReady()
         let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -193,7 +195,27 @@ final class LocalLLMManager: ObservableObject {
         try await ensureServerRunning()
         return try await chatCompletions(
             system: LLMPolishPrompt.system,
-            user: LLMPolishPrompt.user(text: text, tone: tone, conservative: conservative),
+            user: LLMPolishPrompt.user(
+                text: text,
+                tone: tone,
+                conservative: conservative,
+                previousText: previousText,
+                script: script
+            ),
+            timeoutSeconds: timeoutSeconds
+        )
+    }
+
+    func ask(
+        selected: String,
+        instruction: String,
+        timeoutSeconds: TimeInterval
+    ) async throws -> String {
+        try await ensureReady()
+        try await ensureServerRunning()
+        return try await chatCompletions(
+            system: LLMPolishPrompt.askSystem,
+            user: LLMPolishPrompt.askUser(selected: selected, instruction: instruction),
             timeoutSeconds: timeoutSeconds
         )
     }
