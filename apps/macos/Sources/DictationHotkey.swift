@@ -1,6 +1,27 @@
 import AppKit
 import Carbon.HIToolbox
 
+enum DictationTriggerMode: String, CaseIterable, Identifiable {
+    case hold
+    case toggle
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .hold: return "按住说话"
+        case .toggle: return "点按切换"
+        }
+    }
+
+    var hint: String {
+        switch self {
+        case .hold: return "按住热键说话，松开后识别"
+        case .toggle: return "按一下开始，再按一下结束并识别"
+        }
+    }
+}
+
 /// Push-to-talk hotkey identified by a hardware key code.
 struct DictationHotkey: Equatable, Hashable, Identifiable {
     var keyCode: UInt16
@@ -8,7 +29,9 @@ struct DictationHotkey: Equatable, Hashable, Identifiable {
     var id: UInt16 { keyCode }
 
     static let defaultKeyCode: UInt16 = 61 // Right Option
+    static let defaultAskKeyCode: UInt16 = 97 // F6
     static let `default` = DictationHotkey(keyCode: defaultKeyCode)
+    static let defaultAsk = DictationHotkey(keyCode: defaultAskKeyCode)
 
     static let presets: [DictationHotkey] = [
         .init(keyCode: 61), // Right Option
@@ -17,6 +40,7 @@ struct DictationHotkey: Equatable, Hashable, Identifiable {
         .init(keyCode: 59), // Left Control
         .init(keyCode: 63), // Fn
         .init(keyCode: 96), // F5
+        .init(keyCode: 97), // F6
     ]
 
     var isModifier: Bool {
@@ -70,7 +94,14 @@ struct DictationHotkey: Equatable, Hashable, Identifiable {
     }
 
     var settingsLabel: String {
-        "\(displayName)（按住说话）"
+        settingsLabel(mode: .hold)
+    }
+
+    func settingsLabel(mode: DictationTriggerMode) -> String {
+        switch mode {
+        case .hold: return "\(displayName)（按住说话）"
+        case .toggle: return "\(displayName)（点按切换）"
+        }
     }
 
     private static func characters(forKeyCode keyCode: UInt16) -> String? {
