@@ -7,6 +7,8 @@ enum SenseVoiceCoreMLError: LocalizedError {
     case emptyResult
     case noSpeech
     case rejectedGarbage(String)
+    /// All attempts were sparse/unreliable; associated text is the best weak candidate.
+    case weakResult(String)
 
     var errorDescription: String? {
         switch self {
@@ -20,6 +22,8 @@ enum SenseVoiceCoreMLError: LocalizedError {
             return "SenseVoice 未检测到有效语音"
         case .rejectedGarbage(let text):
             return "SenseVoice 结果异常已丢弃（\(text)）"
+        case .weakResult(let text):
+            return "SenseVoice 结果不可靠（\(text)）"
         }
     }
 }
@@ -131,7 +135,7 @@ final class SenseVoiceCoreMLProvider {
     }
 
     func transcribe(wavURL: URL) throws -> String {
-        var audio = try WavConverter.loadFloat32Mono16k(url: wavURL)
+        let audio = try WavConverter.loadFloat32Mono16k(url: wavURL)
         let rawCount = audio.count
         let trimmed = WavConverter.trimSilence(audio)
         let normalized = WavConverter.peakNormalize(trimmed)
@@ -142,29 +146,42 @@ final class SenseVoiceCoreMLProvider {
             Double(trimmed.count) / Double(SenseVoiceConfig.sampleRate)
         )
 
-        let attempts: [(label: String, samples: [Float], language: Int32?, textNorm: Int32?)] = [
-            ("peakNorm", normalized, nil, nil),
-            ("warmup+peakNorm", normalized, nil, nil),
-            ("noPeakNorm", trimmed, nil, nil),
-            ("woitn", trimmed, nil, SenseVoiceConfig.textNormEmbedIndex(enableITN: false)),
-            ("auto+woitn", trimmed, SenseVoiceConfig.languageEmbedIndex("auto"), SenseVoiceConfig.textNormEmbedIndex(enableITN: false)),
-            ("rawNoTrim", audio, nil, SenseVoiceConfig.textNormEmbedIndex(enableITN: false)),
-        ]
+        if trimmed.count > SenseVoiceConfig.maxWaveformSamples {
+            return try transcribeLongAudio(normalized: normalized, trimmed: trimmed)
+        }
 
+        return try transcribeWithRetries(normalized: normalized, trimmed: trimmed, raw: audio)
+    }
+
+    /// Split audio longer than the CoreML 30s waveform limit into overlapping chunks.
+    private func transcribeLongAudio(normalized: [Float], trimmed: [Float]) throws -> String {
+        let source = normalized.count >= SenseVoiceConfig.minWaveformSamples ? normalized : trimmed
+        let chunks = Self.splitWaveform(
+            source,
+            chunkSamples: SenseVoiceConfig.chunkWaveformSamples,
+            overlapSamples: SenseVoiceConfig.chunkOverlapSamples
+        )
+        NSLog(
+            "SenseVoice: long audio %.1fs exceeds %.0fs limit — %d chunks",
+            Double(source.count) / Double(SenseVoiceConfig.sampleRate),
+            Double(SenseVoiceConfig.maxWaveformSamples) / Double(SenseVoiceConfig.sampleRate),
+            chunks.count
+        )
+
+        var parts: [String] = []
         var lastError: Error = SenseVoiceCoreMLError.noSpeech
-        for (index, attempt) in attempts.enumerated() {
-            if index == 1 {
-                NSLog("SenseVoice: empty/nospeech — re-warmup and retry")
-                try warmup()
-            } else if index > 0 {
-                NSLog("SenseVoice: retry \(attempt.label)")
-            }
+        for (index, chunk) in chunks.enumerated() {
+            NSLog(
+                "SenseVoice: chunk %d/%d (%.1fs)",
+                index + 1,
+                chunks.count,
+                Double(chunk.count) / Double(SenseVoiceConfig.sampleRate)
+            )
             do {
-                return try transcribe(
-                    waveformFloat32: attempt.samples,
-                    languageOverride: attempt.language,
-                    textNormOverride: attempt.textNorm
-                )
+                let text = try transcribeSingleChunk(chunk)
+                if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    parts.append(text)
+                }
             } catch let error as SenseVoiceCoreMLError {
                 switch error {
                 case .noSpeech, .emptyResult:
@@ -173,9 +190,152 @@ final class SenseVoiceCoreMLProvider {
                 default:
                     throw error
                 }
+            } catch {
+                lastError = error
+                // CoreML shape errors should not happen after chunking; surface clearly.
+                if Self.isWaveformLengthError(error) {
+                    throw SenseVoiceCoreMLError.inferenceFailed(
+                        "音频分段后仍超长，请缩短单次听写（最长约 30 秒/段）"
+                    )
+                }
+                throw error
             }
         }
+
+        let joined = Self.joinTranscriptParts(parts)
+        guard !joined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw lastError
+        }
+        NSLog("SenseVoice: long audio joined parts=%d text=%@", parts.count, joined)
+        return joined
+    }
+
+    private func transcribeSingleChunk(_ samples: [Float]) throws -> String {
+        do {
+            return try transcribe(waveformFloat32: samples)
+        } catch let error as SenseVoiceCoreMLError {
+            switch error {
+            case .noSpeech, .emptyResult:
+                return try transcribe(
+                    waveformFloat32: samples,
+                    textNormOverride: SenseVoiceConfig.textNormEmbedIndex(enableITN: false)
+                )
+            default:
+                throw error
+            }
+        }
+    }
+
+    private func transcribeWithRetries(normalized: [Float], trimmed: [Float], raw: [Float]) throws -> String {
+        let attempts: [(label: String, samples: [Float], language: Int32?, textNorm: Int32?)] = [
+            ("peakNorm", normalized, nil, nil),
+            ("woitn+peakNorm", normalized, nil, SenseVoiceConfig.textNormEmbedIndex(enableITN: false)),
+            ("noPeakNorm", trimmed, nil, nil),
+            ("woitn", trimmed, nil, SenseVoiceConfig.textNormEmbedIndex(enableITN: false)),
+            ("auto+woitn", trimmed, SenseVoiceConfig.languageEmbedIndex("auto"), SenseVoiceConfig.textNormEmbedIndex(enableITN: false)),
+            // Prefer ITN on raw audio when trimmed paths fail — restores commas/periods.
+            ("rawNoTrim+itn", raw, nil, SenseVoiceConfig.textNormEmbedIndex(enableITN: true)),
+            // rawNoTrim woitn often hallucinates on leading/trailing silence — last resort only.
+            ("rawNoTrim", raw, nil, SenseVoiceConfig.textNormEmbedIndex(enableITN: false)),
+        ]
+
+        var lastError: Error = SenseVoiceCoreMLError.noSpeech
+        var weakCandidates: [(label: String, text: String)] = []
+
+        for (index, attempt) in attempts.enumerated() {
+            if index > 0 {
+                NSLog("SenseVoice: retry \(attempt.label)")
+            }
+            do {
+                let text = try transcribe(
+                    waveformFloat32: attempt.samples,
+                    languageOverride: attempt.language,
+                    textNormOverride: attempt.textNorm
+                )
+                let seconds = Double(attempt.samples.count) / Double(SenseVoiceConfig.sampleRate)
+                let weak = attempt.label == "rawNoTrim" || Self.isWeakTranscript(text, audioSeconds: seconds)
+                if weak {
+                    NSLog(
+                        "SenseVoice: weak candidate %@ (%.1fs, chars=%d): %@",
+                        attempt.label,
+                        seconds,
+                        Self.contentCharacterCount(text),
+                        text
+                    )
+                    weakCandidates.append((attempt.label, text))
+                    continue
+                }
+                return text
+            } catch let error as SenseVoiceCoreMLError {
+                switch error {
+                case .noSpeech, .emptyResult:
+                    lastError = error
+                    continue
+                default:
+                    throw error
+                }
+            } catch {
+                if Self.isWaveformLengthError(error) {
+                    NSLog("SenseVoice: waveform length error on short path — chunking")
+                    return try transcribeLongAudio(normalized: normalized, trimmed: trimmed)
+                }
+                throw SenseVoiceCoreMLError.inferenceFailed(error.localizedDescription)
+            }
+        }
+
+        // Only weak / rawNoTrim results: hand off to whisper (keep best weak as fallback).
+        if let best = weakCandidates.max(by: {
+            Self.contentCharacterCount($0.text) < Self.contentCharacterCount($1.text)
+        }) {
+            NSLog(
+                "SenseVoice: no strong candidate — weak %@ → %@",
+                best.label,
+                best.text
+            )
+            throw SenseVoiceCoreMLError.weakResult(best.text)
+        }
         throw lastError
+    }
+
+    private static func splitWaveform(_ samples: [Float], chunkSamples: Int, overlapSamples: Int) -> [[Float]] {
+        let maxLen = min(chunkSamples, SenseVoiceConfig.maxWaveformSamples)
+        guard samples.count > maxLen else { return [samples] }
+
+        let step = max(1, maxLen - max(0, overlapSamples))
+        var chunks: [[Float]] = []
+        var start = 0
+        while start < samples.count {
+            let end = min(start + maxLen, samples.count)
+            let slice = Array(samples[start..<end])
+            if slice.count >= SenseVoiceConfig.minWaveformSamples {
+                chunks.append(slice)
+            } else if let last = chunks.last {
+                // Merge a tiny tail into the previous chunk when possible.
+                let merged = last + slice
+                if merged.count <= SenseVoiceConfig.maxWaveformSamples {
+                    chunks[chunks.count - 1] = merged
+                } else {
+                    chunks.append(Array(slice.suffix(SenseVoiceConfig.minWaveformSamples)))
+                }
+            }
+            if end >= samples.count { break }
+            start += step
+        }
+        return chunks.isEmpty ? [samples] : chunks
+    }
+
+    private static func joinTranscriptParts(_ parts: [String]) -> String {
+        parts
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "")
+    }
+
+    private static func isWaveformLengthError(_ error: Error) -> Bool {
+        let message = error.localizedDescription
+        return message.contains("allowed range")
+            || message.contains("480000")
+            || message.contains("dimension (1)")
     }
 
     func transcribe(
@@ -185,6 +345,11 @@ final class SenseVoiceCoreMLProvider {
     ) throws -> String {
         guard !audio.isEmpty else {
             throw SenseVoiceCoreMLError.emptyResult
+        }
+        if audio.count > SenseVoiceConfig.maxWaveformSamples {
+            throw SenseVoiceCoreMLError.inferenceFailed(
+                "单段音频过长（\(String(format: "%.1f", Double(audio.count) / Double(SenseVoiceConfig.sampleRate)))s），上限约 30 秒"
+            )
         }
 
         let features = try runPreprocessor(audio: audio)
@@ -212,9 +377,11 @@ final class SenseVoiceCoreMLProvider {
             throw SenseVoiceCoreMLError.noSpeech
         }
         let seconds = Double(audio.count) / Double(SenseVoiceConfig.sampleRate)
-        if Self.isImplausiblyShort(decoded.text, audioSeconds: seconds) {
+        // Only reject near-empty transcripts here. Density checks happen in the retry
+        // loop so we can keep weak candidates and still fall back to whisper.
+        if Self.isNearEmptyTranscript(decoded.text, audioSeconds: seconds) {
             NSLog(
-                "SenseVoice: treating implausibly short result as empty: \"%@\" for %.1fs audio",
+                "SenseVoice: treating near-empty result as empty: \"%@\" for %.1fs audio",
                 decoded.text,
                 seconds
             )
@@ -223,14 +390,49 @@ final class SenseVoiceCoreMLProvider {
         return decoded.text
     }
 
-    /// Long utterance but only 1–2 content chars — usually a failed decode, not real speech.
-    private static func isImplausiblyShort(_ text: String, audioSeconds: Double) -> Bool {
-        let content = text.filter { ch in
-            !ch.isWhitespace && !ch.isPunctuation && !ch.isNewline
-        }
-        if audioSeconds >= 8, content.count < 6 { return true }
-        if audioSeconds >= 3, content.count < 3 { return true }
+    /// Truly empty-ish results only (avoid discarding usable partials).
+    private static func isNearEmptyTranscript(_ text: String, audioSeconds: Double) -> Bool {
+        let n = contentCharacterCount(text)
+        if n == 0 { return true }
+        if audioSeconds >= 3, n < 2 { return true }
+        if audioSeconds >= 8, n < 4 { return true }
         return false
+    }
+
+    static func contentCharacterCount(_ text: String) -> Int {
+        text.filter { ch in
+            !ch.isWhitespace && !ch.isPunctuation && !ch.isNewline
+        }.count
+    }
+
+    /// Sparse vs duration — often a failed / hallucinated decode.
+    static func isWeakTranscript(_ text: String, audioSeconds: Double) -> Bool {
+        let n = contentCharacterCount(text)
+        if n < 2 { return true }
+        if audioSeconds >= 5.0, Double(n) < audioSeconds * 2.2 { return true }
+        if audioSeconds >= 7.0, Double(n) < audioSeconds * 1.8 { return true }
+        return false
+    }
+
+    static func pickBetterTranscript(_ a: String, _ b: String) -> String {
+        let ca = contentCharacterCount(a)
+        let cb = contentCharacterCount(b)
+        let pa = punctuationCount(a)
+        let pb = punctuationCount(b)
+
+        // Similar content: prefer the one with punctuation (ITN / whisper).
+        if abs(ca - cb) <= 4, pa != pb {
+            return pb > pa ? b : a
+        }
+        if cb >= ca + 3 { return b }
+        if ca >= cb + 3 { return a }
+        if pb > pa { return b }
+        if pa > pb { return a }
+        return ca >= cb ? a : b
+    }
+
+    private static func punctuationCount(_ text: String) -> Int {
+        text.filter { "，。？！、；：,.".contains($0) }.count
     }
 
     /// "。" / "…" / mixed punctuation with no real content — common withitn on silence.

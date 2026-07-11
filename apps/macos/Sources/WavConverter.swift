@@ -139,4 +139,21 @@ enum WavConverter {
         let gain = targetPeak / peak
         return samples.map { $0 * gain }
     }
+
+    /// Peak absolute amplitude in [-1, 1] range.
+    static func peakAmplitude(_ samples: [Float]) -> Float {
+        samples.map { abs($0) }.max() ?? 0
+    }
+
+    /// True when the clip is likely silence / mic bump with no speech.
+    static func looksLikeSilence(
+        _ samples: [Float],
+        sampleRate: Int = SenseVoiceConfig.sampleRate,
+        minDurationSeconds: Double = 0.35,
+        minPeak: Float = 0.02
+    ) -> Bool {
+        let duration = Double(samples.count) / Double(sampleRate)
+        if duration < minDurationSeconds { return true }
+        return peakAmplitude(samples) < minPeak
+    }
 }

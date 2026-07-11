@@ -15,6 +15,13 @@ enum SenseVoiceConfig {
     static let numQueryTokens = 4
     static let buckets = [128, 256, 512, 1024, 1800]
 
+    /// CoreML preprocessor waveform length constraints (samples @ 16 kHz).
+    static let minWaveformSamples = 3_200 // 0.2s
+    static let maxWaveformSamples = 480_000 // 30s
+    /// Chunk size for long dictation (leave headroom under max).
+    static let chunkWaveformSamples = 28 * sampleRate // 28s
+    static let chunkOverlapSamples = sampleRate / 2 // 0.5s
+
     /// FunASR lid embed: auto=0, zh=3, en=4, yue=7, ja=11, ko=12, nospeech=13
     static let defaultLanguage: Int32 = 3
     /// 14 = withitn（标点/数字归一化），15 = woitn（纯文本）

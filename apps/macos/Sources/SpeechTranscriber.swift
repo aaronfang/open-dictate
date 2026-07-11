@@ -35,21 +35,108 @@ final class SpeechTranscriber {
         switch settings.sttEngine {
         case .senseVoice:
             do {
-                return try await transcribeWithSenseVoice(wavURL: wavURL, settings: settings)
+                let text = try await transcribeWithSenseVoice(wavURL: wavURL, settings: settings)
+                return try await maybeImproveWithWhisper(
+                    senseVoiceText: text,
+                    wavURL: wavURL,
+                    settings: settings
+                )
             } catch let error as SenseVoiceCoreMLError {
                 switch error {
                 case .noSpeech, .emptyResult:
-                    if whisperFallbackAvailable(settings: settings) {
-                        NSLog("SpeechTranscriber: SenseVoice empty — falling back to whisper.cpp")
-                        return try await transcribeWithWhisper(wavURL: wavURL, settings: settings)
-                    }
-                    throw error
+                    return try await whisperOrThrow(wavURL: wavURL, settings: settings, fallback: nil, underlying: error)
+                case .weakResult(let weakText):
+                    NSLog("SpeechTranscriber: SenseVoice weak — trying whisper.cpp")
+                    return try await whisperOrThrow(
+                        wavURL: wavURL,
+                        settings: settings,
+                        fallback: weakText,
+                        underlying: error
+                    )
                 default:
                     throw error
                 }
             }
         case .whisper:
             return try await transcribeWithWhisper(wavURL: wavURL, settings: settings)
+        }
+    }
+
+    /// If SenseVoice looks sparse vs duration, compare with whisper and keep the denser transcript.
+    private func maybeImproveWithWhisper(
+        senseVoiceText: String,
+        wavURL: URL,
+        settings: AppSettings
+    ) async throws -> String {
+        guard whisperFallbackAvailable(settings: settings) else { return senseVoiceText }
+        let seconds: Double
+        do {
+            let samples = try WavConverter.loadFloat32Mono16k(url: wavURL)
+            seconds = Double(samples.count) / Double(SenseVoiceConfig.sampleRate)
+        } catch {
+            return senseVoiceText
+        }
+        guard SenseVoiceCoreMLProvider.isWeakTranscript(senseVoiceText, audioSeconds: seconds) else {
+            return senseVoiceText
+        }
+        NSLog(
+            "SpeechTranscriber: SenseVoice strong-path still weak (%.1fs, chars=%d) — comparing whisper",
+            seconds,
+            SenseVoiceCoreMLProvider.contentCharacterCount(senseVoiceText)
+        )
+        do {
+            let whisperText = try await transcribeWithWhisper(wavURL: wavURL, settings: settings)
+            let best = SenseVoiceCoreMLProvider.pickBetterTranscript(senseVoiceText, whisperText)
+            NSLog(
+                "SpeechTranscriber: pickBetter sv=%@ whisper=%@ → %@",
+                senseVoiceText,
+                whisperText,
+                best
+            )
+            return best
+        } catch {
+            NSLog("SpeechTranscriber: whisper compare failed: %@", error.localizedDescription)
+            return senseVoiceText
+        }
+    }
+
+    private func whisperOrThrow(
+        wavURL: URL,
+        settings: AppSettings,
+        fallback: String?,
+        underlying: Error
+    ) async throws -> String {
+        guard whisperFallbackAvailable(settings: settings) else {
+            if let fallback, !fallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return fallback
+            }
+            throw underlying
+        }
+        do {
+            let whisperText = try await transcribeWithWhisper(wavURL: wavURL, settings: settings)
+            let trimmed = whisperText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                if let fallback, !fallback.isEmpty { return fallback }
+                throw underlying
+            }
+            if let fallback, !fallback.isEmpty {
+                let best = SenseVoiceCoreMLProvider.pickBetterTranscript(fallback, trimmed)
+                NSLog(
+                    "SpeechTranscriber: whisper fallback pickBetter weak=%@ whisper=%@ → %@",
+                    fallback,
+                    trimmed,
+                    best
+                )
+                return best
+            }
+            NSLog("SpeechTranscriber whisper fallback: %@", trimmed)
+            return trimmed
+        } catch {
+            if let fallback, !fallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                NSLog("SpeechTranscriber: whisper failed, using SenseVoice weak: %@", fallback)
+                return fallback
+            }
+            throw underlying
         }
     }
 
