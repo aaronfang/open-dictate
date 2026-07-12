@@ -57,6 +57,20 @@ enum TextIntelligence {
         let tone = profile?.tone
         let provider = settings.llmPolishProvider
 
+        // Empty / nospeech-like input must not reach the LLM with "previous text",
+        // or the model often echoes the last paste (clipboard) back for insertion.
+        if isEffectivelyEmptyTranscript(raw) {
+            NSLog("TextIntelligence: skip empty/weak transcript")
+            return ProcessResult(
+                text: "",
+                tone: tone,
+                appId: appId,
+                profileApplied: false,
+                llmApplied: false,
+                llmProvider: provider
+            )
+        }
+
         var text = applyDictionary(raw, storePath: settings.storePath)
         text = settings.chineseScript.normalize(text)
 
@@ -72,11 +86,25 @@ enum TextIntelligence {
             text = settings.chineseScript.normalize(text)
         }
 
+        if isEffectivelyEmptyTranscript(text) {
+            NSLog("TextIntelligence: empty after rules — skip LLM/paste")
+            return ProcessResult(
+                text: "",
+                tone: tone,
+                appId: appId,
+                profileApplied: false,
+                llmApplied: false,
+                llmProvider: provider
+            )
+        }
+
         let looksLikeRevision = isRevisionCommand(text)
         let previous = previousText?.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Always offer previous text to the LLM; the prompt says to ignore it unless
-        // this turn is clearly an edit instruction (semantic, not keyword-gated).
-        let previousForLLM = previous.map { settings.chineseScript.normalize($0) }
+        // Only send previous text when this turn looks like an edit command.
+        // Always sending it caused empty/weak turns to be "filled in" from clipboard history.
+        let previousForLLM: String? = looksLikeRevision
+            ? previous.map { settings.chineseScript.normalize($0) }
+            : nil
 
         var llmApplied = false
         let preLLM = text
@@ -122,6 +150,16 @@ enum TextIntelligence {
                     ) {
                         NSLog(
                             "TextIntelligence LLM rejected (too divergent): in=%@ out=%@",
+                            preLLM,
+                            normalizedPolished
+                        )
+                    } else if let previous,
+                              !looksLikeRevision,
+                              contentCharacters(normalizedPolished) == contentCharacters(previous),
+                              contentCharacterCount(preLLM) < 4 {
+                        // Weak input + LLM echoed last delivery — do not paste again.
+                        NSLog(
+                            "TextIntelligence LLM rejected (echoed previous on weak input): in=%@ out=%@",
                             preLLM,
                             normalizedPolished
                         )
@@ -299,6 +337,62 @@ enum TextIntelligence {
             text = stripTrailingPeriod(text)
         }
         return text
+    }
+
+    /// True when recognition is empty, nospeech, or only fillers/punctuation — must not paste.
+    static func isEffectivelyEmptyTranscript(_ raw: String) -> Bool {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return true }
+        let lowered = s.lowercased()
+        if lowered.contains("<|nospeech|>") || lowered.contains("[nospeech]") {
+            return true
+        }
+        // Strip common SenseVoice / whisper tags.
+        for tag in ["<|nospeech|>", "<|zh|>", "<|en|>", "<|yue|>", "<|ja|>", "<|ko|>",
+                    "<|NEUTRAL|>", "<|HAPPY|>", "<|SAD|>", "<|ANGRY|>",
+                    "<|withitn|>", "<|woitn|>"] {
+            s = s.replacingOccurrences(of: tag, with: "", options: .caseInsensitive)
+        }
+        s = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.isEmpty { return true }
+        let content = contentCharacterCount(s)
+        if content == 0 { return true }
+        // Lone fillers / acknowledgements with no substance.
+        let fillers: Set<String> = ["嗯", "啊", "呃", "额", "哦", "噢", "唔", "嘿", "嗨", "um", "uh", "ah", "oh"]
+        if content <= 2, fillers.contains(s.lowercased()) { return true }
+        return false
+    }
+
+    /// Ask model returned the spoken instruction instead of editing the selection.
+    static func isAskResultInstructionLeak(
+        selected: String,
+        instruction: String,
+        result: String
+    ) -> Bool {
+        let sel = contentCharacters(selected)
+        let ins = contentCharacters(instruction)
+        let out = contentCharacters(result)
+        guard ins.count >= 4, out.count >= 4 else { return false }
+
+        let lcsInstr = longestCommonSubsequenceLength(ins, out)
+        let fromInstruction = Double(lcsInstr) / Double(out.count)
+
+        // Output is essentially the spoken line.
+        if fromInstruction >= 0.88 {
+            // Allow only if selection was already almost the same as instruction
+            // (rare) — otherwise this is dictation-via-Ask.
+            if sel.count >= 4 {
+                let lcsSel = longestCommonSubsequenceLength(sel, out)
+                let fromSelection = Double(lcsSel) / Double(out.count)
+                if fromSelection >= 0.75 { return false }
+            }
+            return true
+        }
+        return false
+    }
+
+    private static func contentCharacterCount(_ text: String) -> Int {
+        contentCharacters(text).count
     }
 
     /// Reject LLM output that invents wording, reorders freely, or drops most content.

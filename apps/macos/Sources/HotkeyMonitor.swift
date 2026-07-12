@@ -1,7 +1,7 @@
 import AppKit
 
 final class HotkeyMonitor {
-    private var keyCode: CGKeyCode
+    private var hotkey: DictationHotkey
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var isPressed = false
@@ -11,15 +11,23 @@ final class HotkeyMonitor {
     private(set) var isActive = false
 
     init(keyCode: CGKeyCode = DictationHotkey.defaultKeyCode) {
-        self.keyCode = keyCode
+        self.hotkey = DictationHotkey(keyCode: UInt16(keyCode))
+    }
+
+    init(hotkey: DictationHotkey) {
+        self.hotkey = hotkey
     }
 
     func update(keyCode: CGKeyCode) {
+        update(hotkey: DictationHotkey(keyCode: UInt16(keyCode)))
+    }
+
+    func update(hotkey: DictationHotkey) {
         let wasActive = isActive
         if wasActive {
             stop()
         }
-        self.keyCode = keyCode
+        self.hotkey = hotkey
         isPressed = false
         if wasActive {
             start()
@@ -59,7 +67,7 @@ final class HotkeyMonitor {
         }
         CGEvent.tapEnable(tap: tap, enable: true)
         isActive = true
-        NSLog("Hotkey monitor started for keyCode \(keyCode)")
+        NSLog("Hotkey monitor started for %@", hotkey.displayName)
     }
 
     func stop() {
@@ -87,36 +95,84 @@ final class HotkeyMonitor {
             return Unmanaged.passUnretained(event)
         }
 
+        if hotkey.isModifierOnly {
+            return handleModifierOnly(type: type, event: event)
+        }
+        return handleChordOrKey(type: type, event: event)
+    }
+
+    /// Lone modifier PTT (e.g. Right Option) — existing behavior.
+    private func handleModifierOnly(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         let eventKeyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
-        guard eventKeyCode == keyCode else {
+        guard eventKeyCode == CGKeyCode(hotkey.keyCode) else {
             return Unmanaged.passUnretained(event)
         }
-
-        let hotkey = DictationHotkey(keyCode: UInt16(keyCode))
 
         switch type {
         case .flagsChanged:
-            guard hotkey.isModifier else { break }
             setPressed(Self.modifierFlagIsDown(keyCode: eventKeyCode, flags: event.flags))
             return Unmanaged.passUnretained(event)
+        default:
+            return Unmanaged.passUnretained(event)
+        }
+    }
 
+    /// Chord (⌥空格) or plain non-modifier key (F6).
+    ///
+    /// For chords in hold mode: start on primary keyDown, but stay "pressed" until the
+    /// required modifiers are released. Releasing Space while still holding Option must
+    /// NOT end the session (otherwise Ask flashes and exits immediately).
+    private func handleChordOrKey(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        let eventKeyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+        let present = HotkeyModifierFlags.from(cgFlags: event.flags)
+
+        switch type {
         case .keyDown:
-            guard !hotkey.isModifier else { break }
-            if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
-                setPressed(true)
+            guard eventKeyCode == CGKeyCode(hotkey.keyCode) else {
+                return Unmanaged.passUnretained(event)
             }
+            guard event.getIntegerValueField(.keyboardEventAutorepeat) == 0 else {
+                return nil
+            }
+            guard modifiersMatchForChord(present) else {
+                return Unmanaged.passUnretained(event)
+            }
+            setPressed(true)
             return nil
 
         case .keyUp:
-            guard !hotkey.isModifier else { break }
+            guard eventKeyCode == CGKeyCode(hotkey.keyCode) else {
+                return Unmanaged.passUnretained(event)
+            }
+            guard isPressed else {
+                return Unmanaged.passUnretained(event)
+            }
+            if hotkey.isChord, modifiersMatchForChord(present) {
+                // Keep holding via Option/Control/etc.; end only when modifiers drop.
+                NSLog("Hotkey %@: primary up, modifiers still held — keep pressed", hotkey.displayName)
+                return nil
+            }
             setPressed(false)
             return nil
 
-        default:
-            break
-        }
+        case .flagsChanged:
+            if isPressed, hotkey.isChord, !modifiersMatchForChord(present) {
+                setPressed(false)
+            }
+            return Unmanaged.passUnretained(event)
 
-        return Unmanaged.passUnretained(event)
+        default:
+            return Unmanaged.passUnretained(event)
+        }
+    }
+
+    /// Chord requires all configured modifiers; ignore Fn/caps bits outside our set.
+    private func modifiersMatchForChord(_ present: HotkeyModifierFlags) -> Bool {
+        if hotkey.modifiers.isEmpty {
+            return present.isEmpty
+        }
+        // Require at least the configured modifiers (exact among the four we track).
+        return hotkey.modifiers.matchesExact(present)
     }
 
     private static func modifierFlagIsDown(keyCode: CGKeyCode, flags: CGEventFlags) -> Bool {
@@ -139,7 +195,7 @@ final class HotkeyMonitor {
     private func setPressed(_ pressed: Bool) {
         guard pressed != isPressed else { return }
         isPressed = pressed
-        NSLog("Hotkey \(keyCode) \(pressed ? "down" : "up")")
+        NSLog("Hotkey %@ %@", hotkey.displayName, pressed ? "down" : "up")
 
         let callback = pressed ? onHotkeyDown : onHotkeyUp
         DispatchQueue.main.async {

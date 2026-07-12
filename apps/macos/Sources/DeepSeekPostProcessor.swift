@@ -46,7 +46,8 @@ enum DeepSeekPostProcessor {
                 previousText: previousText,
                 script: script
             ),
-            config: config
+            config: config,
+            maxTokens: 1024
         )
     }
 
@@ -58,14 +59,16 @@ enum DeepSeekPostProcessor {
         try await chat(
             system: LLMPolishPrompt.askSystem,
             user: LLMPolishPrompt.askUser(selected: selected, instruction: instruction),
-            config: config
+            config: config,
+            maxTokens: 2048
         )
     }
 
     private static func chat(
         system: String,
         user: String,
-        config: Config
+        config: Config,
+        maxTokens: Int
     ) async throws -> String {
         let trimmedKey = config.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedKey.isEmpty else { throw ProcessError.notConfigured }
@@ -80,12 +83,16 @@ enum DeepSeekPostProcessor {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(trimmedKey)", forHTTPHeaderField: "Authorization")
 
+        // Keep V4 default thinking mode (enabled). Cap output so runaway reasoning
+        // cannot bill unbounded tokens; reasoning counts toward max_tokens.
         let body: [String: Any] = [
             "model": config.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? "deepseek-v4-flash"
                 : config.model.trimmingCharacters(in: .whitespacesAndNewlines),
             "temperature": 0.2,
             "stream": false,
+            "max_tokens": maxTokens,
+            "thinking": ["type": "enabled"],
             "messages": [
                 ["role": "system", "content": system],
                 ["role": "user", "content": user],
@@ -117,6 +124,22 @@ enum DeepSeekPostProcessor {
             let content = message["content"] as? String
         else {
             throw ProcessError.badResponse
+        }
+
+        if let usage = json["usage"] as? [String: Any] {
+            let prompt = usage["prompt_tokens"] as? Int ?? -1
+            let completion = usage["completion_tokens"] as? Int ?? -1
+            let reasoning = usage["reasoning_tokens"] as? Int
+                ?? (usage["completion_tokens_details"] as? [String: Any])?["reasoning_tokens"] as? Int
+                ?? -1
+            let total = usage["total_tokens"] as? Int ?? -1
+            NSLog(
+                "DeepSeek usage prompt=%d completion=%d reasoning=%d total=%d",
+                prompt,
+                completion,
+                reasoning,
+                total
+            )
         }
 
         let out = content.trimmingCharacters(in: .whitespacesAndNewlines)
