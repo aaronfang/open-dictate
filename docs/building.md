@@ -56,6 +56,18 @@ open dist/OpenDictate.app
 
 设置 → 语音识别 →「Voice Processing（降噪 / AGC）」**默认关闭**。开启后对 `AVAudioEngine` input 调用 `setVoiceProcessingEnabled`；若设备不支持则自动回退普通麦克风。停录时关闭 VP 并重建引擎，避免橙色麦克风指示灯或系统音量闪避残留。开启期间其他 App 音量被压低是系统通话闪避。
 
+### 嘈杂场景策略
+
+同页「嘈杂场景策略」默认关闭。**加强降噪**会强制启用系统 VP，并在 SenseVoice 结果上更积极地与 Whisper 对比；**优先 Whisper** 在已配置 whisper.cpp 时用 Whisper 作为本会话引擎（未就绪则回退默认引擎）。
+
 ### 能量 VAD
 
 `EnergyVAD` 做自适应噪声底估计、首尾语音裁剪与空录门控。点按切换模式下，「尾静音自动结束」默认开启：检测到说话后约 1.1s 静音即自动停录。
+
+### Ask 选区
+
+Ask 取选区顺序：AX → 模拟 Cmd+C →（可选）现有剪贴板。失败时 HUD 提示并带上当前 App 名；设置里可关「选区失败时使用剪贴板」。
+
+### 火山引擎 ASR
+
+设置 → 语音识别 →「火山引擎（云端，音频出网）」。填写新版 API Key，或旧版 App Key + Access Key；需开通 `volc.bigasr.auc_turbo`。识别时将整段 WAV Base64 上传至豆包极速版接口。

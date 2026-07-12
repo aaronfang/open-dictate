@@ -43,14 +43,19 @@ WHISPER_CPP_BIN=whisper-cli WHISPER_MODEL_PATH=/path/to/model.bin \
 
 ### 3) 火山引擎（云端，可选）
 
-位置：`core/core-stt/src/volcengine.rs`
+**macOS 产品路径（已接入）**：`apps/macos/Sources/VolcengineAsrClient.swift`
 
-实现方式：优先支持 **Realtime/OpenAI 兼容事件流** 的 WebSocket JSON 协议形态（便于快速打通），并可按需扩展到 ASR v3 的二进制封包协议。
+- 协议：豆包「录音文件极速版」HTTP  
+  `POST https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash`
+- 鉴权：新版 `X-Api-Key`，或旧版 `X-Api-App-Key` + `X-Api-Access-Key`
+- 音频：本地 WAV → Base64 上传（**出网类型：音频**）
+- 设置：识别引擎选「火山引擎」；需开通 `volc.bigasr.auc_turbo`
+- 文档：https://www.volcengine.com/docs/6561/1631584
 
-参考：
+**Core 骨架（未接线）**：`core/core-stt/src/volcengine.rs`
 
-- 协议详情（v3 二进制）：`https://docs.volcengine.com/docs/6561/1354869?lang=zh`
-- Realtime API（事件流）：`https://www.volcengine.com/docs/6559/2310293?lang=zh`
+- 优先 Realtime/OpenAI 兼容 WebSocket JSON；可扩展 ASR v3 二进制封包
+- 参考：v3 二进制 `https://docs.volcengine.com/docs/6561/1354869`；Realtime `https://www.volcengine.com/docs/6559/2310293`
 
 ## PostProcessors
 
