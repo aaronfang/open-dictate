@@ -238,7 +238,7 @@ struct SettingsView: View {
 
         SettingsCard(
             title: "Ask AI",
-            footer: "先选中文本，再按 Ask 热键说出指令（如「改得更正式」「缩到一句话」）。需要开启本地或 DeepSeek 润色。触发方式与听写相同。"
+            footer: "先选中文本（可编辑或只读网页均可，取不到选区时会试 Cmd+C），再按 Ask 热键说出指令，例如「改得更正式」「缩到一句话」「翻译成英文」。需要开启本地或 DeepSeek 润色。触发方式与听写相同。"
         ) {
             Toggle("启用 Ask AI", isOn: askEnabledBinding)
 
@@ -346,6 +346,14 @@ struct SettingsView: View {
             }
             .pickerStyle(.radioGroup)
             .labelsHidden()
+        }
+
+        SettingsCard(
+            title: "录音前端",
+            footer: "Voice Processing 默认关闭（开启时录音期间会压低其他声音，类似通话）。停录会释放麦克风。点按切换模式下，说完后的尾静音可自动结束录音。"
+        ) {
+            Toggle("Voice Processing（降噪 / AGC）", isOn: $settings.enableVoiceProcessing)
+            Toggle("点按模式：尾静音自动结束", isOn: $settings.enableSilenceAutoStop)
         }
 
         if settings.sttEngine == .senseVoice {

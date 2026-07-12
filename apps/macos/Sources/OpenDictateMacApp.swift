@@ -338,12 +338,33 @@ final class StatusController: NSObject, ObservableObject {
         }
         hud.show(text: recordingHint)
 
+        recorder.onTrailingSilence = { [weak self] in
+            guard let self else { return }
+            // Auto-stop is intended for toggle mode; hold mode ends on key-up.
+            guard self.settings.dictationTriggerMode == .toggle,
+                  self.activeSession != nil,
+                  self.recorder.state == .recording else { return }
+            NSLog("Session auto-stop: trailing silence")
+            self.endSession()
+        }
+
         do {
-            _ = try recorder.startRecording()
+            let autoStop = settings.enableSilenceAutoStop
+                && settings.dictationTriggerMode == .toggle
+            _ = try recorder.startRecording(
+                enableVoiceProcessing: settings.enableVoiceProcessing,
+                enableSilenceAutoStop: autoStop
+            )
+            NSLog(
+                "Session record voiceProcessing=%@ autoStop=%@",
+                recorder.lastVoiceProcessingStatus.rawValue,
+                autoStop ? "yes" : "no"
+            )
         } catch {
             NSLog("startRecording error: \(error)")
             activeSession = nil
             askSelectedText = nil
+            recorder.onTrailingSilence = nil
             hud.show(text: "录音失败：\((error as NSError).localizedDescription)")
         }
     }
@@ -351,6 +372,7 @@ final class StatusController: NSObject, ObservableObject {
     private func endSession() {
         guard let kind = activeSession else { return }
         activeSession = nil
+        recorder.onTrailingSilence = nil
         NSLog("Session end: \(kind)")
         recorder.stopRecording()
         hud.hide()
@@ -413,12 +435,15 @@ final class StatusController: NSObject, ObservableObject {
     private func isSilentRecording(_ wavURL: URL) -> Bool {
         do {
             let samples = try WavConverter.loadFloat32Mono16k(url: wavURL)
-            let silent = WavConverter.looksLikeSilence(samples)
+            let analysis = EnergyVAD.analyze(samples)
+            let silent = EnergyVAD.looksLikeSilence(samples)
             if silent {
                 NSLog(
-                    "Audio silence gate: frames=%d peak=%.4f duration=%.2fs",
+                    "Audio silence gate: frames=%d peak=%.4f speech=%.2fs floor=%.4f duration=%.2fs",
                     samples.count,
-                    WavConverter.peakAmplitude(samples),
+                    analysis.peak,
+                    analysis.speechDurationSeconds,
+                    analysis.noiseFloor,
                     Double(samples.count) / Double(SenseVoiceConfig.sampleRate)
                 )
             }

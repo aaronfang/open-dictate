@@ -10,6 +10,11 @@ final class AppSettings: ObservableObject {
     @AppStorage("senseVoiceLanguage") var senseVoiceLanguage: String = "zh"
     /// Inverse text normalization: punctuation + number formatting (SenseVoice withitn).
     @AppStorage("senseVoiceEnableITN") var senseVoiceEnableITN: Bool = true
+    /// System Voice Processing (noise suppression / AGC) on the mic input.
+    /// Default off: VP ducks other apps' volume and can leave the orange mic indicator if mis-torn-down.
+    @AppStorage("enableVoiceProcessing") var enableVoiceProcessing: Bool = false
+    /// In toggle mode, stop recording after trailing silence once speech was heard.
+    @AppStorage("enableSilenceAutoStop") var enableSilenceAutoStop: Bool = true
 
     @AppStorage("whisperBinary") var whisperBinary: String = "/opt/homebrew/bin/whisper-cli"
     @AppStorage("whisperModelPath") var whisperModelPath: String = "/Users/aaronfang/Documents/github/open-dictate/models/ggml-base.bin"
