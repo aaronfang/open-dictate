@@ -79,8 +79,7 @@ enum WavConverter {
         return aggregated
     }
 
-    /// Trim leading/trailing silence. SenseVoice treats utterances dominated by
-    /// low-level noise as `<|nospeech|>` even when speech is present.
+    /// Trim leading/trailing silence using adaptive energy VAD.
     static func trimSilence(
         _ samples: [Float],
         sampleRate: Int = SenseVoiceConfig.sampleRate,
@@ -88,47 +87,15 @@ enum WavConverter {
         padMs: Int = 200,
         rmsThreshold: Float = 0.01
     ) -> [Float] {
-        guard !samples.isEmpty else { return samples }
-
-        let frameLen = max(1, sampleRate * frameMs / 1000)
-        let pad = sampleRate * padMs / 1000
-        let threshSq = rmsThreshold * rmsThreshold
-        let count = samples.count
-
-        func frameRMS(at offset: Int) -> Float {
-            let end = min(offset + frameLen, count)
-            guard end > offset else { return 0 }
-            var sum: Float = 0
-            for i in offset..<end {
-                let v = samples[i]
-                sum += v * v
-            }
-            return sum / Float(end - offset)
+        _ = frameMs
+        _ = padMs
+        _ = rmsThreshold
+        let trimmed = EnergyVAD.trimToSpeech(samples, sampleRate: sampleRate)
+        // Fall back to original if VAD collapsed everything (very quiet speech).
+        if trimmed.count < max(1, samples.count / 20), samples.count > sampleRate / 2 {
+            return samples
         }
-
-        var start = 0
-        var offset = 0
-        while offset + frameLen <= count {
-            if frameRMS(at: offset) > threshSq {
-                start = max(0, offset - pad)
-                break
-            }
-            offset += frameLen
-        }
-
-        var end = count
-        offset = count - frameLen
-        while offset >= 0 {
-            if frameRMS(at: offset) > threshSq {
-                end = min(count, offset + frameLen + pad)
-                break
-            }
-            if offset == 0 { break }
-            offset -= frameLen
-        }
-
-        guard end > start else { return samples }
-        return Array(samples[start..<end])
+        return trimmed
     }
 
     /// Scale quiet waveforms toward the training distribution without clipping.
@@ -152,8 +119,8 @@ enum WavConverter {
         minDurationSeconds: Double = 0.35,
         minPeak: Float = 0.02
     ) -> Bool {
-        let duration = Double(samples.count) / Double(sampleRate)
-        if duration < minDurationSeconds { return true }
-        return peakAmplitude(samples) < minPeak
+        _ = minDurationSeconds
+        _ = minPeak
+        return EnergyVAD.looksLikeSilence(samples, sampleRate: sampleRate)
     }
 }
