@@ -10,6 +10,17 @@ final class TextInjector {
         case clipboardOnly
     }
 
+    enum SelectionSource: String {
+        case ax
+        case commandC
+        case clipboard
+    }
+
+    struct SelectionCapture: Equatable {
+        let text: String
+        let source: SelectionSource
+    }
+
     private var targetApp: NSRunningApplication?
     private var focusedElement: AXUIElement?
     private var pendingPasteWorkItem: DispatchWorkItem?
@@ -72,13 +83,37 @@ final class TextInjector {
         return nil
     }
 
-    /// Best-effort selected text from the focused AX element, else Cmd+C clipboard snapshot.
-    func captureSelectedText() -> String? {
+    /// Best-effort selected text: AX → Cmd+C → optional existing clipboard.
+    func captureSelectedText(allowClipboardFallback: Bool = false) -> SelectionCapture? {
         rememberTarget()
+        let appName = targetAppName ?? "unknown"
+
         if let ax = selectedTextFromAX(), !ax.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return ax
+            NSLog("Ask selection: AX ok app=%@ chars=%d", appName, ax.count)
+            return SelectionCapture(text: ax, source: .ax)
         }
-        return copySelectionViaClipboard()
+        NSLog("Ask selection: AX miss app=%@", appName)
+
+        if let copied = copySelectionViaClipboard() {
+            NSLog("Ask selection: Cmd+C ok app=%@ chars=%d", appName, copied.count)
+            return SelectionCapture(text: copied, source: .commandC)
+        }
+        NSLog("Ask selection: Cmd+C empty app=%@", appName)
+
+        if allowClipboardFallback,
+           let existing = NSPasteboard.general.string(forType: .string),
+           !existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            NSLog("Ask selection: clipboard fallback app=%@ chars=%d", appName, existing.count)
+            return SelectionCapture(text: existing, source: .clipboard)
+        }
+
+        NSLog(
+            "Ask selection: failed app=%@ role=%@ editable=%@",
+            appName,
+            focusedRole() ?? "nil",
+            isFocusedElementStrictlyEditable() ? "yes" : "no"
+        )
+        return nil
     }
 
     /// Always writes `text` to the general pasteboard and keeps it there.
@@ -124,11 +159,17 @@ final class TextInjector {
                 return
             }
             let current = NSPasteboard.general.string(forType: .string) ?? ""
+            // Only paste if clipboard still holds the text we just wrote for this insert.
+            // Prevents Cmd+V from dumping unrelated/old clipboard after a cancelled turn.
             if current != trimmed {
                 guard self.copyToClipboard(trimmed) else {
                     NSLog("TextInjector: clipboard lost before paste — abort")
                     return
                 }
+            }
+            guard generation == self.pasteGeneration else {
+                NSLog("TextInjector: paste aborted after clipboard refresh gen=%llu", generation)
+                return
             }
             self.postPaste()
         }
