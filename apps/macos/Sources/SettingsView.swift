@@ -189,7 +189,7 @@ struct SettingsView: View {
 
         SettingsCard(
             title: "热键",
-            footer: "\(settings.dictationTriggerMode.hint)。不支持 Esc / Command（会干扰取消与粘贴）。更改后立即生效。全局热键与文本注入需要「辅助功能」授权。"
+            footer: "\(settings.dictationTriggerMode.hint)。支持单键或组合键（如 ⌃空格、⌃⇧D）。组合键在「按住说话」下：按下主键开始后，可松开主键、继续按住修饰键说话，松修饰键结束。录音/识别中可按 Esc 取消。听写若用单独 Option，Ask 请勿用 Option+…（会抢触发）。"
         ) {
             SettingsRow(label: "当前热键") {
                 Text(settings.dictationHotkey.settingsLabel(mode: settings.dictationTriggerMode))
@@ -210,15 +210,15 @@ struct SettingsView: View {
 
             Picker("常用热键", selection: hotkeyPresetBinding) {
                 ForEach(DictationHotkey.presets) { preset in
-                    Text(preset.displayName).tag(Int(preset.keyCode))
+                    Text(preset.displayName).tag(preset.id)
                 }
-                if !DictationHotkey.presets.map(\.keyCode).contains(UInt16(settings.dictationHotkeyKeyCode)) {
+                if !DictationHotkey.presets.contains(settings.dictationHotkey) {
                     Text(settings.dictationHotkey.displayName)
-                        .tag(settings.dictationHotkeyKeyCode)
+                        .tag(settings.dictationHotkey.id)
                 }
             }
 
-            HotkeyCaptureButton(keyCode: $settings.dictationHotkeyKeyCode) { recording in
+            HotkeyCaptureButton(hotkey: dictationHotkeyBinding) { recording in
                 if recording {
                     statusController.pauseHotkeyForCapture()
                 } else {
@@ -227,9 +227,9 @@ struct SettingsView: View {
                 }
             }
 
-            if settings.dictationHotkeyKeyCode != Int(DictationHotkey.defaultKeyCode) {
+            if settings.dictationHotkey != .default {
                 Button("恢复默认（右 Option）") {
-                    settings.dictationHotkeyKeyCode = Int(DictationHotkey.defaultKeyCode)
+                    settings.dictationHotkey = .default
                     statusController.applyDictationHotkeyFromSettings()
                 }
                 .buttonStyle(.borderless)
@@ -238,11 +238,17 @@ struct SettingsView: View {
 
         SettingsCard(
             title: "Ask AI",
-            footer: "先选中文本（可编辑或只读网页均可，取不到选区时会试 Cmd+C），再按 Ask 热键说出指令，例如「改得更正式」「缩到一句话」「翻译成英文」。需要开启本地或 DeepSeek 润色。触发方式与听写相同。"
+            footer: "先选中文本（可编辑或只读均可）。取不到选区时会试 Cmd+C；仍失败会提示。开启「剪贴板兜底」时，可用你事先 Cmd+C 的内容。需要开启本地或 DeepSeek 润色。触发方式与听写相同。"
         ) {
             Toggle("启用 Ask AI", isOn: askEnabledBinding)
 
             if settings.enableAskAI {
+                Toggle("选区失败时使用剪贴板", isOn: $settings.askAllowClipboardFallback)
+                Text("默认关闭。开启后，取不到选区时会用剪贴板里已有文字当选区（易把语音指令误当成听写上屏）。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
                 SettingsRow(label: "当前热键") {
                     Text(settings.askAIHotkey.displayName)
                         .foregroundStyle(.primary)
@@ -250,15 +256,15 @@ struct SettingsView: View {
 
                 Picker("常用热键", selection: askHotkeyPresetBinding) {
                     ForEach(DictationHotkey.presets) { preset in
-                        Text(preset.displayName).tag(Int(preset.keyCode))
+                        Text(preset.displayName).tag(preset.id)
                     }
-                    if !DictationHotkey.presets.map(\.keyCode).contains(UInt16(settings.askAIHotkeyKeyCode)) {
+                    if !DictationHotkey.presets.contains(settings.askAIHotkey) {
                         Text(settings.askAIHotkey.displayName)
-                            .tag(settings.askAIHotkeyKeyCode)
+                            .tag(settings.askAIHotkey.id)
                     }
                 }
 
-                HotkeyCaptureButton(keyCode: $settings.askAIHotkeyKeyCode) { recording in
+                HotkeyCaptureButton(hotkey: askHotkeyBinding) { recording in
                     if recording {
                         statusController.pauseHotkeyForCapture()
                     } else {
@@ -267,22 +273,44 @@ struct SettingsView: View {
                     }
                 }
 
-                if settings.askAIHotkeyKeyCode == settings.dictationHotkeyKeyCode {
+                if settings.askAIHotkey == settings.dictationHotkey {
                     Text("Ask 热键与听写热键相同，请更换其中一个。")
                         .font(.caption)
                         .foregroundStyle(.red)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                if settings.askAIHotkeyKeyCode != Int(DictationHotkey.defaultAskKeyCode) {
+                if settings.askAIHotkey != .defaultAsk {
                     Button("恢复默认（F6）") {
-                        settings.askAIHotkeyKeyCode = Int(DictationHotkey.defaultAskKeyCode)
+                        settings.askAIHotkey = .defaultAsk
                         statusController.applyAskHotkeyFromSettings()
                     }
                     .buttonStyle(.borderless)
                 }
             }
         }
+    }
+
+    private var dictationHotkeyBinding: Binding<DictationHotkey> {
+        Binding(
+            get: { settings.dictationHotkey },
+            set: { newValue in
+                settings.dictationHotkey = newValue
+                resolveAskHotkeyConflictIfNeeded()
+                statusController.applyDictationHotkeyFromSettings()
+            }
+        )
+    }
+
+    private var askHotkeyBinding: Binding<DictationHotkey> {
+        Binding(
+            get: { settings.askAIHotkey },
+            set: { newValue in
+                settings.askAIHotkey = newValue
+                resolveAskHotkeyConflictIfNeeded()
+                statusController.applyAskHotkeyFromSettings()
+            }
+        )
     }
 
     private var triggerModeBinding: Binding<String> {
@@ -295,11 +323,15 @@ struct SettingsView: View {
         )
     }
 
-    private var hotkeyPresetBinding: Binding<Int> {
+    private var hotkeyPresetBinding: Binding<String> {
         Binding(
-            get: { settings.dictationHotkeyKeyCode },
+            get: { settings.dictationHotkey.id },
             set: { newValue in
-                settings.dictationHotkeyKeyCode = newValue
+                if let preset = DictationHotkey.presets.first(where: { $0.id == newValue }) {
+                    settings.dictationHotkey = preset
+                } else if let parsed = Self.parseHotkeyId(newValue) {
+                    settings.dictationHotkey = parsed
+                }
                 resolveAskHotkeyConflictIfNeeded()
                 statusController.applyDictationHotkeyFromSettings()
             }
@@ -316,11 +348,15 @@ struct SettingsView: View {
         )
     }
 
-    private var askHotkeyPresetBinding: Binding<Int> {
+    private var askHotkeyPresetBinding: Binding<String> {
         Binding(
-            get: { settings.askAIHotkeyKeyCode },
+            get: { settings.askAIHotkey.id },
             set: { newValue in
-                settings.askAIHotkeyKeyCode = newValue
+                if let preset = DictationHotkey.presets.first(where: { $0.id == newValue }) {
+                    settings.askAIHotkey = preset
+                } else if let parsed = Self.parseHotkeyId(newValue) {
+                    settings.askAIHotkey = parsed
+                }
                 resolveAskHotkeyConflictIfNeeded()
                 statusController.applyAskHotkeyFromSettings()
             }
@@ -328,17 +364,25 @@ struct SettingsView: View {
     }
 
     private func resolveAskHotkeyConflictIfNeeded() {
-        if settings.askAIHotkeyKeyCode == settings.dictationHotkeyKeyCode {
-            let fallback = Int(DictationHotkey.defaultAskKeyCode)
-            settings.askAIHotkeyKeyCode = settings.dictationHotkeyKeyCode == fallback
-                ? Int(DictationHotkey.presets.first(where: { Int($0.keyCode) != settings.dictationHotkeyKeyCode })?.keyCode ?? 96)
+        if settings.askAIHotkey == settings.dictationHotkey {
+            let fallback = DictationHotkey.defaultAsk
+            settings.askAIHotkey = settings.dictationHotkey == fallback
+                ? (DictationHotkey.presets.first(where: { $0 != settings.dictationHotkey }) ?? DictationHotkey(keyCode: 96))
                 : fallback
         }
     }
 
+    private static func parseHotkeyId(_ id: String) -> DictationHotkey? {
+        let parts = id.split(separator: "|")
+        guard parts.count == 2,
+              let code = UInt16(parts[0]),
+              let mods = Int(parts[1]) else { return nil }
+        return DictationHotkey(keyCode: code, modifiers: HotkeyModifierFlags(rawValue: mods))
+    }
+
     @ViewBuilder
     private var recognitionPane: some View {
-        SettingsCard(title: "识别引擎", footer: "推荐 SenseVoice（本地 CoreML）。whisper.cpp 适合已有 ggml 模型的场景。") {
+        SettingsCard(title: "识别引擎", footer: "推荐 SenseVoice（本地 CoreML）。whisper.cpp 适合已有 ggml 模型的场景。火山引擎为云端 ASR，录音会出网。") {
             Picker("", selection: $settings.sttEngineRaw) {
                 ForEach(STTEngine.allCases) { engine in
                     Text(engine.displayName).tag(engine.rawValue)
@@ -350,10 +394,15 @@ struct SettingsView: View {
 
         SettingsCard(
             title: "录音前端",
-            footer: "Voice Processing 默认关闭（开启时录音期间会压低其他声音，类似通话）。停录会释放麦克风。点按切换模式下，说完后的尾静音可自动结束录音。"
+            footer: "Voice Processing 默认关闭（开启时录音期间会压低其他声音）。嘈杂策略默认关闭：加强降噪会强制启用 VP；优先 Whisper 仅在已配置 whisper.cpp 时覆盖默认引擎。"
         ) {
             Toggle("Voice Processing（降噪 / AGC）", isOn: $settings.enableVoiceProcessing)
             Toggle("点按模式：尾静音自动结束", isOn: $settings.enableSilenceAutoStop)
+            Picker("嘈杂场景策略", selection: $settings.noisySceneStrategyRaw) {
+                ForEach(NoisySceneStrategy.allCases) { strategy in
+                    Text(strategy.displayName).tag(strategy.rawValue)
+                }
+            }
         }
 
         if settings.sttEngine == .senseVoice {
@@ -393,7 +442,7 @@ struct SettingsView: View {
                 Toggle("使用 INT8 模型（更小，推荐）", isOn: $settings.senseVoiceUseInt8)
                 Toggle("使用 FP32 编码器（无 ANE 时）", isOn: $settings.senseVoiceUseFp32)
             }
-        } else {
+        } else if settings.sttEngine == .whisper {
             SettingsCard(title: "whisper.cpp") {
                 SettingsPathField(label: "可执行文件", text: $settings.whisperBinary)
                 SettingsPathField(label: "模型路径（ggml *.bin）", text: $settings.whisperModelPath)
@@ -407,6 +456,47 @@ struct SettingsView: View {
                     .labelsHidden()
                     .frame(maxWidth: 180)
                 }
+            }
+        } else if settings.sttEngine == .volcengine {
+            SettingsCard(
+                title: "火山引擎 ASR",
+                footer: "使用豆包「录音文件极速版」HTTP。新版控制台填 API Key 即可；旧版填 App Key + Access Key。需在控制台开通 volc.bigasr.auc_turbo。Key 存于本机 UserDefaults。"
+            ) {
+                SettingsSecureField(label: "API Key（新版优先）", text: $settings.volcengineApiKey)
+                SettingsSecureField(label: "App Key", text: $settings.volcengineAppKey)
+                SettingsSecureField(label: "Access Key", text: $settings.volcengineAccessKey)
+                SettingsRow(label: "超时（秒）") {
+                    TextField("", value: $settings.volcengineTimeoutSeconds, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 72)
+                }
+                SettingsRow(label: "出网类型") {
+                    SettingsStatusBadge(text: "音频（整段录音）", tone: .warn)
+                }
+                SettingsRow(label: "汉字字形") {
+                    Picker("", selection: $settings.chineseScriptRaw) {
+                        ForEach(ChineseScriptPreference.allCases) { pref in
+                            Text(pref.displayName).tag(pref.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 180)
+                }
+                if !settings.volcengineConfigured {
+                    Text("请填写 API Key，或同时填写 App Key 与 Access Key。")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            SettingsCard(title: "高级") {
+                SettingsPathField(label: "Endpoint", text: $settings.volcengineEndpoint)
+                SettingsLabeledField(
+                    label: "Resource Id",
+                    placeholder: "volc.bigasr.auc_turbo",
+                    text: $settings.volcengineResourceId
+                )
             }
         }
     }
@@ -440,7 +530,7 @@ struct SettingsView: View {
         }
 
         if settings.llmPolishProvider == .deepseek {
-            SettingsCard(title: "DeepSeek", footer: "失败或超时会回退到规则结果并照常上屏。Key 存于本机 UserDefaults。") {
+            SettingsCard(title: "DeepSeek", footer: "失败或超时会回退到规则结果并照常上屏。Key 存于本机 UserDefaults。默认开启思考模式；润色/Ask 分别限制 max_tokens 为 1024 / 2048。") {
                 SettingsSecureField(label: "API Key", text: $settings.deepSeekApiKey)
                 SettingsRow(label: "模型") {
                     Picker("", selection: $settings.deepSeekModel) {
@@ -1308,19 +1398,20 @@ struct LocalLLMSettingsBlock: View {
     }
 }
 
-/// Click to capture the next key press as the push-to-talk hotkey.
+/// Click to capture the next key / chord as the hotkey.
 private struct HotkeyCaptureButton: View {
-    @Binding var keyCode: Int
+    @Binding var hotkey: DictationHotkey
     /// `true` while capturing; `false` when finished or cancelled.
     var onRecordingChange: (Bool) -> Void
 
     @State private var isRecording = false
     @State private var errorText: String?
     @State private var monitor: Any?
+    @State private var pendingSoloModifier: UInt16?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Button(isRecording ? "按下新热键…（Esc 取消）" : "录制自定义热键…") {
+            Button(isRecording ? "按下新热键或组合键…（Esc 取消）" : "录制自定义热键…") {
                 if isRecording {
                     stopRecording()
                 } else {
@@ -1342,6 +1433,7 @@ private struct HotkeyCaptureButton: View {
 
     private func startRecording() {
         errorText = nil
+        pendingSoloModifier = nil
         isRecording = true
         onRecordingChange(true)
         stopMonitor()
@@ -1354,6 +1446,7 @@ private struct HotkeyCaptureButton: View {
     private func stopRecording() {
         guard isRecording || monitor != nil else { return }
         isRecording = false
+        pendingSoloModifier = nil
         stopMonitor()
         onRecordingChange(false)
     }
@@ -1362,6 +1455,15 @@ private struct HotkeyCaptureButton: View {
         if let monitor {
             NSEvent.removeMonitor(monitor)
             self.monitor = nil
+        }
+    }
+
+    private func commit(_ captured: DictationHotkey) {
+        DispatchQueue.main.async {
+            self.hotkey = captured
+            self.errorText = nil
+            self.pendingSoloModifier = nil
+            self.stopRecording()
         }
     }
 
@@ -1376,34 +1478,61 @@ private struct HotkeyCaptureButton: View {
         }
 
         if event.type == .flagsChanged {
-            guard DictationHotkey(keyCode: code).isModifier else {
-                return event
-            }
+            let isMod = DictationHotkey(keyCode: code).isModifierKey
+            guard isMod else { return event }
+
             let down: Bool
             switch code {
             case 58, 61: down = event.modifierFlags.contains(.option)
             case 59, 62: down = event.modifierFlags.contains(.control)
             case 56, 60: down = event.modifierFlags.contains(.shift)
+            case 55, 54: down = event.modifierFlags.contains(.command)
             case 63: down = event.modifierFlags.contains(.function)
             default: down = false
             }
-            guard down else { return nil }
-        } else if event.type != .keyDown {
-            return event
-        }
 
-        guard DictationHotkey.isAllowed(code) else {
-            DispatchQueue.main.async {
-                self.errorText = "不能使用 Esc 或 Command，请换一个键"
+            if down {
+                // Wait for either a chord key or release of this lone modifier.
+                pendingSoloModifier = code
+                return nil
+            }
+
+            // Modifier released: if nothing else was pressed, accept lone modifier
+            // (except Command — reserved for system paste).
+            if pendingSoloModifier == code {
+                pendingSoloModifier = nil
+                if code == UInt16(kVK_Command) || code == UInt16(kVK_RightCommand) {
+                    DispatchQueue.main.async {
+                        self.errorText = "不能单独使用 Command，请换一个键或组合键"
+                    }
+                    return nil
+                }
+                guard DictationHotkey.isAllowedPrimaryKey(code) else {
+                    DispatchQueue.main.async {
+                        self.errorText = "不能使用 Esc 或 Command 作为主键"
+                    }
+                    return nil
+                }
+                commit(DictationHotkey(keyCode: code))
             }
             return nil
         }
 
-        DispatchQueue.main.async {
-            self.keyCode = Int(code)
-            self.errorText = nil
-            self.stopRecording()
+        guard event.type == .keyDown else { return event }
+        // Chord or plain key: modifiers from the event + this key.
+        pendingSoloModifier = nil
+        let mods = HotkeyModifierFlags.from(nsFlags: event.modifierFlags)
+        guard DictationHotkey.isAllowedPrimaryKey(code) else {
+            DispatchQueue.main.async {
+                self.errorText = "不能使用 Esc 或 Command 作为主键，可用 ⌘ 作修饰键"
+            }
+            return nil
         }
+        // Lone modifier keys shouldn't arrive as keyDown on macOS typically.
+        if DictationHotkey(keyCode: code).isModifierKey, mods.isEmpty {
+            return nil
+        }
+        commit(DictationHotkey(keyCode: code, modifiers: mods))
         return nil
     }
 }

@@ -3,6 +3,7 @@ import Foundation
 enum STTEngine: String, CaseIterable, Identifiable {
     case senseVoice = "sensevoice"
     case whisper = "whisper"
+    case volcengine = "volcengine"
 
     var id: String { rawValue }
 
@@ -12,6 +13,28 @@ enum STTEngine: String, CaseIterable, Identifiable {
             return "SenseVoice（推荐，中文更准）"
         case .whisper:
             return "whisper.cpp"
+        case .volcengine:
+            return "火山引擎（云端，音频出网）"
+        }
+    }
+}
+
+/// Optional boost for noisy rooms; default stays SenseVoice + normal mic path.
+enum NoisySceneStrategy: String, CaseIterable, Identifiable {
+    case off = "off"
+    case boostDenoise = "boost_denoise"
+    case preferWhisper = "prefer_whisper"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .off:
+            return "关闭（默认）"
+        case .boostDenoise:
+            return "加强降噪（系统 VP）"
+        case .preferWhisper:
+            return "优先 Whisper"
         }
     }
 }
@@ -32,14 +55,16 @@ final class SpeechTranscriber {
     var isSenseVoiceLoading: Bool { loadTask != nil && !isSenseVoiceLoaded }
 
     func transcribe(wavURL: URL, settings: AppSettings) async throws -> String {
-        switch settings.sttEngine {
+        let engine = settings.sessionSTTEngine(whisperAvailable: whisperFallbackAvailable(settings: settings))
+        switch engine {
         case .senseVoice:
             do {
                 let text = try await transcribeWithSenseVoice(wavURL: wavURL, settings: settings)
                 return try await maybeImproveWithWhisper(
                     senseVoiceText: text,
                     wavURL: wavURL,
-                    settings: settings
+                    settings: settings,
+                    aggressive: settings.noisySceneStrategy == .boostDenoise
                 )
             } catch let error as SenseVoiceCoreMLError {
                 switch error {
@@ -59,6 +84,11 @@ final class SpeechTranscriber {
             }
         case .whisper:
             return try await transcribeWithWhisper(wavURL: wavURL, settings: settings)
+        case .volcengine:
+            return try await VolcengineAsrClient.transcribe(
+                wavURL: wavURL,
+                config: settings.volcengineConfig
+            )
         }
     }
 
@@ -66,7 +96,8 @@ final class SpeechTranscriber {
     private func maybeImproveWithWhisper(
         senseVoiceText: String,
         wavURL: URL,
-        settings: AppSettings
+        settings: AppSettings,
+        aggressive: Bool = false
     ) async throws -> String {
         guard whisperFallbackAvailable(settings: settings) else { return senseVoiceText }
         let seconds: Double
@@ -76,13 +107,16 @@ final class SpeechTranscriber {
         } catch {
             return senseVoiceText
         }
-        guard SenseVoiceCoreMLProvider.isWeakTranscript(senseVoiceText, audioSeconds: seconds) else {
+        let shouldCompare = aggressive
+            || SenseVoiceCoreMLProvider.isWeakTranscript(senseVoiceText, audioSeconds: seconds)
+        guard shouldCompare else {
             return senseVoiceText
         }
         NSLog(
-            "SpeechTranscriber: SenseVoice strong-path still weak (%.1fs, chars=%d) — comparing whisper",
+            "SpeechTranscriber: SenseVoice compare whisper (%.1fs, chars=%d, aggressive=%@)",
             seconds,
-            SenseVoiceCoreMLProvider.contentCharacterCount(senseVoiceText)
+            SenseVoiceCoreMLProvider.contentCharacterCount(senseVoiceText),
+            aggressive ? "yes" : "no"
         )
         do {
             let whisperText = try await transcribeWithWhisper(wavURL: wavURL, settings: settings)
@@ -147,6 +181,10 @@ final class SpeechTranscriber {
             || FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/whisper-cli")
         let modelOK = FileManager.default.fileExists(atPath: model)
         return binaryOK && modelOK
+    }
+
+    func isWhisperReady(settings: AppSettings) -> Bool {
+        whisperFallbackAvailable(settings: settings)
     }
 
     /// Load models at launch; ANE warmup continues in background and must not block dictation.

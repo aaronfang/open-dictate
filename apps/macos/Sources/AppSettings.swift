@@ -15,10 +15,23 @@ final class AppSettings: ObservableObject {
     @AppStorage("enableVoiceProcessing") var enableVoiceProcessing: Bool = false
     /// In toggle mode, stop recording after trailing silence once speech was heard.
     @AppStorage("enableSilenceAutoStop") var enableSilenceAutoStop: Bool = true
+    /// Noisy-room strategy: off / force VP / prefer whisper.cpp for this setting.
+    @AppStorage("noisySceneStrategy") var noisySceneStrategyRaw: String = NoisySceneStrategy.off.rawValue
 
     @AppStorage("whisperBinary") var whisperBinary: String = "/opt/homebrew/bin/whisper-cli"
     @AppStorage("whisperModelPath") var whisperModelPath: String = "/Users/aaronfang/Documents/github/open-dictate/models/ggml-base.bin"
     @AppStorage("whisperLanguage") var whisperLanguage: String = "auto"
+
+    /// 火山豆包录音文件极速版 ASR（音频出网）。
+    @AppStorage("volcengineAppKey") var volcengineAppKey: String = ""
+    @AppStorage("volcengineAccessKey") var volcengineAccessKey: String = ""
+    /// 新版控制台统一 Key；若填写则优先于 App/Access。
+    @AppStorage("volcengineApiKey") var volcengineApiKey: String = ""
+    @AppStorage("volcengineEndpoint") var volcengineEndpoint: String =
+        "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash"
+    @AppStorage("volcengineResourceId") var volcengineResourceId: String = "volc.bigasr.auc_turbo"
+    @AppStorage("volcengineTimeoutSeconds") var volcengineTimeoutSeconds: Double = 30
+
     @AppStorage("storePath") var storePath: String = {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let appDir = dir.appendingPathComponent("OpenDictate", isDirectory: true)
@@ -47,12 +60,18 @@ final class AppSettings: ObservableObject {
 
     /// Push-to-talk hardware key code. Default: right Option (61).
     @AppStorage("dictationHotkeyKeyCode") var dictationHotkeyKeyCode: Int = Int(DictationHotkey.defaultKeyCode)
+    @AppStorage("dictationHotkeyModifiers") var dictationHotkeyModifiers: Int = 0
     /// hold = press-and-hold; toggle = press to start, press again to stop.
     @AppStorage("dictationTriggerMode") var dictationTriggerModeRaw: String = DictationTriggerMode.hold.rawValue
 
     /// Ask AI hotkey. Default: F6.
     @AppStorage("askAIHotkeyKeyCode") var askAIHotkeyKeyCode: Int = Int(DictationHotkey.defaultAskKeyCode)
+    @AppStorage("askAIHotkeyModifiers") var askAIHotkeyModifiers: Int = 0
     @AppStorage("enableAskAI") var enableAskAI: Bool = true
+    /// If AX + Cmd+C fail, use existing clipboard text for Ask (with HUD notice).
+    /// Default off: otherwise empty selection silently uses last dictate clipboard and
+    /// Ask often pastes the spoken instruction as if it were dictation.
+    @AppStorage("askAllowClipboardFallback") var askAllowClipboardFallback: Bool = false
 
     /// Local-only dictation history. Default off (privacy).
     @AppStorage("enableDictationHistory") var enableDictationHistory: Bool = false
@@ -72,20 +91,31 @@ final class AppSettings: ObservableObject {
     var dictationHotkey: DictationHotkey {
         get {
             let code = UInt16(clamping: dictationHotkeyKeyCode)
-            return DictationHotkey(keyCode: DictationHotkey.isAllowed(code) ? code : DictationHotkey.defaultKeyCode)
+            let mods = HotkeyModifierFlags(rawValue: dictationHotkeyModifiers)
+            let key = DictationHotkey(
+                keyCode: DictationHotkey.isAllowedPrimaryKey(code) ? code : DictationHotkey.defaultKeyCode,
+                modifiers: mods
+            )
+            return key
         }
         set {
             dictationHotkeyKeyCode = Int(newValue.keyCode)
+            dictationHotkeyModifiers = newValue.modifiers.rawValue
         }
     }
 
     var askAIHotkey: DictationHotkey {
         get {
             let code = UInt16(clamping: askAIHotkeyKeyCode)
-            return DictationHotkey(keyCode: DictationHotkey.isAllowed(code) ? code : DictationHotkey.defaultAskKeyCode)
+            let mods = HotkeyModifierFlags(rawValue: askAIHotkeyModifiers)
+            return DictationHotkey(
+                keyCode: DictationHotkey.isAllowedPrimaryKey(code) ? code : DictationHotkey.defaultAskKeyCode,
+                modifiers: mods
+            )
         }
         set {
             askAIHotkeyKeyCode = Int(newValue.keyCode)
+            askAIHotkeyModifiers = newValue.modifiers.rawValue
         }
     }
 
@@ -138,6 +168,24 @@ final class AppSettings: ObservableObject {
         set { sttEngineRaw = newValue.rawValue }
     }
 
+    var noisySceneStrategy: NoisySceneStrategy {
+        get { NoisySceneStrategy(rawValue: noisySceneStrategyRaw) ?? .off }
+        set { noisySceneStrategyRaw = newValue.rawValue }
+    }
+
+    /// VP for this session: global toggle OR noisy boost strategy.
+    var sessionVoiceProcessing: Bool {
+        enableVoiceProcessing || noisySceneStrategy == .boostDenoise
+    }
+
+    /// Engine for this session. `preferWhisper` only applies when whisper assets are ready.
+    func sessionSTTEngine(whisperAvailable: Bool) -> STTEngine {
+        if noisySceneStrategy == .preferWhisper, whisperAvailable {
+            return .whisper
+        }
+        return sttEngine
+    }
+
     var senseVoiceModelsReady: Bool {
         let base = URL(fileURLWithPath: NSString(string: senseVoiceModelsPath).expandingTildeInPath)
         let encoderName = senseVoiceUseFp32
@@ -149,6 +197,22 @@ final class AppSettings: ObservableObject {
             base.appendingPathComponent("vocab.json").path,
         ]
         return paths.allSatisfy { FileManager.default.fileExists(atPath: $0) }
+    }
+
+    var volcengineConfigured: Bool {
+        VolcengineAsrClient.isConfigured(volcengineConfig)
+    }
+
+    var volcengineConfig: VolcengineAsrClient.Config {
+        VolcengineAsrClient.Config(
+            appKey: volcengineAppKey,
+            accessKey: volcengineAccessKey,
+            apiKey: volcengineApiKey,
+            endpoint: volcengineEndpoint,
+            resourceId: volcengineResourceId,
+            timeoutSeconds: volcengineTimeoutSeconds,
+            uid: volcengineAppKey
+        )
     }
 
     var localLLMReady: Bool { LocalLLMAssets.isReady }
